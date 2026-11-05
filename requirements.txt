@@ -1,0 +1,14 @@
+# Task 1 training. Use Python 3.10-3.12 and a CUDA-compatible PyTorch install.
+torch==2.8.0
+transformers==4.53.1
+datasets==3.6.0
+huggingface-hub==0.33.4
+numpy==2.2.6
+safetensors==0.5.3
+pytest==8.4.1
+lm_eval==0.4.9.1
+accelerate==1.8.1
+peft==0.16.0
+evaluate==0.4.5
+matplotlib==3.10.3
+PyYAML==6.0.3

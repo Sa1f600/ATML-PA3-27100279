@@ -1,0 +1,17 @@
+{
+  "prepared_dir": "cached/task1/prepared",
+  "manifest_dir": "manifests/task1",
+  "results_dir": "results/task1/evaluation",
+  "diagnostics_dir": "results/task1/diagnostics",
+  "qualitative_dir": "results/task1/qualitative",
+  "figures_dir": "figures/task1",
+  "seed": 6304,
+  "harness_version": "0.4.9.1",
+  "gsm8k_max_new_tokens": 1024,
+  "qualitative_max_new_tokens": 512,
+  "merge_atol": 0.1,
+  "merge_rtol": 0.01,
+  "merge_relative_l2_tolerance": 0.01,
+  "diagnostic_layers": [0, 13, 27],
+  "protection_rank": 128
+}
