@@ -1,5 +1,6 @@
 # Task 1 training. Use Python 3.10-3.12 and a CUDA-compatible PyTorch install.
 torch==2.8.0
+torchvision==0.23.0
 transformers==4.53.1
 datasets==3.6.0
 huggingface-hub==0.33.4

@@ -17,6 +17,14 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
+PyTorch 2.8.0 is paired with Torchvision 0.23.0. Kaggle's preinstalled
+Torchvision may belong to a different PyTorch version; leaving it in place can
+make the evaluation-harness import fail with `operator torchvision::nms does
+not exist`. Install the pinned pair through the requirements above. To repair
+an existing installation of this project's PyTorch, use
+`python -m pip install --upgrade torchvision==0.23.0`, then retry in a new
+Python subprocess. Prepared datasets and checkpoints are unaffected.
+
 The prescribed full run deliberately rejects CPU and Apple MPS execution: it
 uses CUDA FP16 autocast, dynamic gradient scaling, and FP32 model/optimizer
 parameters. It does not quantize the model. Available GPU memory depends on
