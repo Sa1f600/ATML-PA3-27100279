@@ -83,6 +83,21 @@ def test_sample_enrichment_uses_harness_extraction_and_records():
     assert primary_score("gsm8k_cot", {"exact_match,flexible-extract": 0.25}) == 0.25
 
 
+def test_progress_updates_are_emitted_for_each_generation(capsys):
+    tokenizer = toy_tokenizer()
+    model = tiny_model().eval()
+    lm = recording_hflm_class()(pretrained=model, tokenizer=tokenizer, batch_size=1, max_length=64,
+                                chat_template_args={"enable_thinking": False})
+    from lm_eval.api.instance import Instance
+    request = Instance(request_type="generate_until", doc={}, arguments=("Q", {
+        "until": ["END"], "max_gen_toks": 1, "do_sample": False}), idx=0)
+    lm.set_progress_label("test/generation")
+    lm.generate_until([request])
+    output = capsys.readouterr().out
+    assert "[progress] test/generation: 0/1 generations (0%)" in output
+    assert "[progress] test/generation: 1/1 generations (100%)" in output
+
+
 def test_completed_benchmark_can_be_reused_only_when_all_samples_are_saved(tmp_path):
     name = "gsm8k_cot"
     metrics = {"exact_match,flexible-extract": 0.25}

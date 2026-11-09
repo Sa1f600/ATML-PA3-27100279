@@ -99,6 +99,44 @@ def recording_hflm_class():
             super().__init__(*args, **kwargs)
             self.generation_records = {}
             self._last_generation = None
+            self._progress_label = None
+            self._progress_total = 0
+            self._progress_done = 0
+            self._progress_next = 0
+            self._progress_unit = "requests"
+
+        def set_progress_label(self, label):
+            self._progress_label = label
+
+        def _start_progress(self, total, unit):
+            self._progress_total = total
+            self._progress_done = 0
+            self._progress_unit = unit
+            self._progress_next = max(1, total // 20)  # Report at approximately 5% intervals.
+            print(f"[progress] {self._progress_label}: 0/{total} {unit} (0%)", flush=True)
+
+        def _advance_progress(self, count):
+            if self._progress_total <= 0:
+                return
+            self._progress_done = min(self._progress_total, self._progress_done + count)
+            if self._progress_done >= self._progress_next or self._progress_done == self._progress_total:
+                percent = 100 * self._progress_done / self._progress_total
+                print(f"[progress] {self._progress_label}: {self._progress_done:,}/{self._progress_total:,} "
+                      f"{self._progress_unit} ({percent:.0f}%)", flush=True)
+                self._progress_next += max(1, self._progress_total // 20)
+
+        def _model_call(self, *args, **kwargs):
+            output = super()._model_call(*args, **kwargs)
+            inputs = args[0] if args else kwargs.get("inps")
+            batch_size = int(inputs.shape[0]) if inputs is not None and inputs.ndim else 1
+            self._advance_progress(batch_size)
+            return output
+
+        def loglikelihood(self, requests, disable_tqdm=False):
+            self._start_progress(len(requests), "likelihood requests")
+            result = super().loglikelihood(requests, disable_tqdm=disable_tqdm)
+            self._advance_progress(self._progress_total - self._progress_done)
+            return result
 
         def _model_generate(self, context, max_length, stop, **kwargs):
             if context.shape[0] != 1:
@@ -113,6 +151,7 @@ def recording_hflm_class():
             return output
 
         def generate_until(self, requests, disable_tqdm=False):
+            self._start_progress(len(requests), "generations")
             responses = []
             for request in requests:
                 self._last_generation = None
@@ -120,6 +159,7 @@ def recording_hflm_class():
                 if self._last_generation is None:
                     raise RuntimeError("Missing generation metadata; do not enable response caching.")
                 self.generation_records[request.args[0]] = self._last_generation
+                self._advance_progress(1)
             return responses
 
     return RecordingHFLM
@@ -211,6 +251,8 @@ def main():
                 print(f"Reusing completed benchmark: {condition}/{name}", flush=True)
                 metrics, examples = recovered["metrics"], recovered["examples"]
             else:
+                print(f"Starting benchmark: {condition}/{name}", flush=True)
+                lm.set_progress_label(f"{condition}/{name}")
                 results = simple_evaluate(
                     model=lm, tasks=[task], num_fewshot=0, limit=None, log_samples=True,
                     apply_chat_template=name == "gsm8k_cot",

@@ -400,6 +400,9 @@ Each finished benchmark task is saved separately. If evaluation is interrupted,
 rerun the same command: it validates and reuses each complete task, then runs
 only unfinished or incomplete tasks. A condition is fully complete only after
 its `results/task1/evaluation/<condition>/complete.json` file is present.
+While a benchmark is running, the evaluator prints progress at roughly 5% intervals;
+GSM8K reports completed generations and the multiple-choice benchmarks report
+completed likelihood requests.
 
 `configs/task1/evaluation.json` specifies the paths and numerical tolerances.
 All benchmark models have FP16 weights and dropout disabled. GSM8K uses the
