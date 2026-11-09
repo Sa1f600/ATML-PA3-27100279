@@ -6,7 +6,10 @@ import pytest
 import torch
 
 from common.experiment import read_json
-from task1_finetuning.evaluate import TASKS, enrich_samples, generation_metadata, primary_score, recording_hflm_class, stable_json
+from task1_finetuning.evaluate import (
+    TASKS, completed_task_from_disk, enrich_samples, generation_metadata,
+    primary_score, recording_hflm_class, stable_json,
+)
 from task1_finetuning.inference import CONDITIONS, compare_logits, merge_adapter_into
 from task1_finetuning.lora import inject_lora, save_adapter
 from test_full_ft import tiny_model, examples
@@ -78,6 +81,21 @@ def test_sample_enrichment_uses_harness_extraction_and_records():
     rows = enrich_samples("gsm8k_cot", samples, {"prompt": {"truncated": True}})
     assert rows[0]["extracted_answer"] == "[invalid]" and rows[0]["truncated"]
     assert primary_score("gsm8k_cot", {"exact_match,flexible-extract": 0.25}) == 0.25
+
+
+def test_completed_benchmark_can_be_reused_only_when_all_samples_are_saved(tmp_path):
+    name = "gsm8k_cot"
+    metrics = {"exact_match,flexible-extract": 0.25}
+    from common.experiment import write_json
+    write_json(tmp_path / f"{name}_results.json", {"results": {name: metrics}})
+    samples_path = tmp_path / f"{name}_samples.jsonl"
+    with samples_path.open("w") as stream:
+        for doc_id in range(TASKS[name][2]):
+            stream.write('{"doc_id": %d}\n' % doc_id)
+    assert completed_task_from_disk(tmp_path, name) == {"metrics": metrics, "examples": TASKS[name][2]}
+    with samples_path.open("a") as stream:
+        stream.write('{"doc_id": 0}\n')
+    assert completed_task_from_disk(tmp_path, name) is None
 
 
 def test_actual_stock_filters_and_prompt_definitions():

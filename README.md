@@ -396,6 +396,10 @@ The fixed condition names are `baseline`, `full_ft_midpoint`, `full_ft_final`,
 `l2_sp_final`, `lora4_final`, `lora16_final`, and `oplora_final`. Use
 `--condition <name>` to evaluate one condition. The midpoint is update 625; final
 is update 1250. Quarter checkpoints and the L2-SP midpoint are recovery-only.
+Each finished benchmark task is saved separately. If evaluation is interrupted,
+rerun the same command: it validates and reuses each complete task, then runs
+only unfinished or incomplete tasks. A condition is fully complete only after
+its `results/task1/evaluation/<condition>/complete.json` file is present.
 
 `configs/task1/evaluation.json` specifies the paths and numerical tolerances.
 All benchmark models have FP16 weights and dropout disabled. GSM8K uses the

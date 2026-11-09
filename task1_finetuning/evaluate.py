@@ -144,6 +144,32 @@ def primary_score(name, results):
     return float(results[key])
 
 
+def completed_task_from_disk(destination, name):
+    """Return a validated saved benchmark result, or ``None`` if it is partial.
+
+    A Kaggle disconnect can happen while a benchmark is running.  The result
+    and sample files are only reusable when both exist and contain the full,
+    unique set of expected document IDs.  Partial files are deliberately left
+    in place; a new evaluation of that task will atomically replace them.
+    """
+    result_path = destination / f"{name}_results.json"
+    samples_path = destination / f"{name}_samples.jsonl"
+    if not result_path.exists() or not samples_path.exists():
+        return None
+    try:
+        result = read_json(result_path)
+        metrics = result["results"][name]
+        primary_score(name, metrics)
+        with samples_path.open() as stream:
+            samples = [json.loads(line) for line in stream if line.strip()]
+        document_ids = {sample["doc_id"] for sample in samples}
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if len(samples) != TASKS[name][2] or len(document_ids) != TASKS[name][2]:
+        return None
+    return {"metrics": metrics, "examples": len(document_ids)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=EVAL_CONFIG)
@@ -168,7 +194,10 @@ def main():
             print(f"Reusing complete evaluation: {condition}", flush=True)
             continue
         destination.mkdir(parents=True, exist_ok=True)
-        write_json(destination / "contract.json", contract)
+        contract_path = destination / "contract.json"
+        if contract_path.exists() and read_json(contract_path) != contract:
+            raise ValueError("Partial evaluation belongs to different model/settings.")
+        write_json(contract_path, contract)
         model, tokenizer = load_condition_model(condition, cfg, merge_check_path=destination / "merge_check.json")
         lm = recording_class(pretrained=model, tokenizer=tokenizer, batch_size=1,
                              max_length=model.config.max_position_embeddings,
@@ -177,26 +206,33 @@ def main():
         started = time.perf_counter()
         for name in TASKS:
             task = load_benchmark_task(name, manager, lock)
-            results = simple_evaluate(
-                model=lm, tasks=[task], num_fewshot=0, limit=None, log_samples=True,
-                apply_chat_template=name == "gsm8k_cot",
-                gen_kwargs={"do_sample": False, "max_gen_toks": cfg["gsm8k_max_new_tokens"]}
-                           if name == "gsm8k_cot" else None,
-                random_seed=6304, numpy_random_seed=6304, torch_random_seed=6304,
-                fewshot_random_seed=6304, bootstrap_iters=0,
-            )
-            samples = enrich_samples(name, results.pop("samples")[name], lm.generation_records)
-            ids = {row["doc_id"] for row in samples}
-            if len(ids) != TASKS[name][2]:
-                raise RuntimeError(f"Incomplete benchmark evaluation: {name}")
-            write_json(destination / f"{name}_results.json", json.loads(stable_json(results)))
-            with (destination / f"{name}_samples.jsonl").open("w") as stream:
-                for row in samples:
-                    stream.write(stable_json(row) + "\n")
-            metrics = results["results"][name]
+            recovered = completed_task_from_disk(destination, name)
+            if recovered is not None:
+                print(f"Reusing completed benchmark: {condition}/{name}", flush=True)
+                metrics, examples = recovered["metrics"], recovered["examples"]
+            else:
+                results = simple_evaluate(
+                    model=lm, tasks=[task], num_fewshot=0, limit=None, log_samples=True,
+                    apply_chat_template=name == "gsm8k_cot",
+                    gen_kwargs={"do_sample": False, "max_gen_toks": cfg["gsm8k_max_new_tokens"]}
+                               if name == "gsm8k_cot" else None,
+                    random_seed=6304, numpy_random_seed=6304, torch_random_seed=6304,
+                    fewshot_random_seed=6304, bootstrap_iters=0,
+                )
+                samples = enrich_samples(name, results.pop("samples")[name], lm.generation_records)
+                ids = {row["doc_id"] for row in samples}
+                if len(samples) != TASKS[name][2] or len(ids) != TASKS[name][2]:
+                    raise RuntimeError(f"Incomplete benchmark evaluation: {name}")
+                write_json(destination / f"{name}_results.json", json.loads(stable_json(results)))
+                with (destination / f"{name}_samples.jsonl").open("w") as stream:
+                    for row in samples:
+                        stream.write(stable_json(row) + "\n")
+                metrics, examples = results["results"][name], len(ids)
             aggregates[name] = {"primary": primary_score(name, metrics), "metrics": metrics,
-                                "examples": len(ids), "split": TASKS[name][1],
+                                "examples": examples, "split": TASKS[name][1],
                                 "dataset_fingerprint": task.dataset[TASKS[name][1]]._fingerprint}
+            # Keep a useful partial summary as well as the task-level files.
+            write_json(destination / "aggregate.json", aggregates)
         write_json(destination / "aggregate.json", aggregates)
         write_json(destination / "complete.json", {"identity": identity, "evaluation_seconds": time.perf_counter()-started})
         del lm, model
