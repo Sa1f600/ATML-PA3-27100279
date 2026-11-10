@@ -79,7 +79,7 @@ def test_termination_distinguishes_token_cap_from_eos_and_stop():
 def test_sample_enrichment_uses_harness_extraction_and_records():
     samples = [{"arguments": [("prompt", {})], "filtered_resps": ["[invalid]"], "filter": "flexible-extract"}]
     rows = enrich_samples("gsm8k_cot", samples, {"prompt": {"truncated": True}})
-    assert rows[0]["extracted_answer"] == "[invalid]" and rows[0]["truncated"]
+    assert rows[0]["extracted_answer"] == "[invalid]" and rows[0]["truncated"] and rows[0]["example_index"] == 0
     assert primary_score("gsm8k_cot", {"exact_match,flexible-extract": 0.25}) == 0.25
 
 
@@ -108,8 +108,7 @@ def test_completed_benchmark_can_be_reused_only_when_all_samples_are_saved(tmp_p
         for doc_id in range(TASKS[name][2]):
             stream.write('{"doc_id": %d}\n' % doc_id)
     assert completed_task_from_disk(tmp_path, name) == {"metrics": metrics, "examples": TASKS[name][2]}
-    with samples_path.open("a") as stream:
-        stream.write('{"doc_id": 0}\n')
+    samples_path.write_text('{"doc_id": 0}\n')
     assert completed_task_from_disk(tmp_path, name) is None
 
 

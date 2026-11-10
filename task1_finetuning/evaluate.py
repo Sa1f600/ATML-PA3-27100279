@@ -167,8 +167,12 @@ def recording_hflm_class():
 
 def enrich_samples(name, samples, generation_records):
     result = []
-    for sample in samples:
+    for example_index, sample in enumerate(samples):
         row = dict(sample)
+        # lm-eval's doc_id is task-dependent and is not guaranteed unique for
+        # every stock task. Preserve it, but use this stable output position to
+        # identify each required per-example record.
+        row["example_index"] = example_index
         if name == "gsm8k_cot":
             prompt = sample["arguments"][0][0]
             row.update(generation_records[prompt])
@@ -202,12 +206,11 @@ def completed_task_from_disk(destination, name):
         primary_score(name, metrics)
         with samples_path.open() as stream:
             samples = [json.loads(line) for line in stream if line.strip()]
-        document_ids = {sample["doc_id"] for sample in samples}
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
-    if len(samples) != TASKS[name][2] or len(document_ids) != TASKS[name][2]:
+    if len(samples) != TASKS[name][2]:
         return None
-    return {"metrics": metrics, "examples": len(document_ids)}
+    return {"metrics": metrics, "examples": len(samples)}
 
 
 def main():
@@ -262,14 +265,13 @@ def main():
                     fewshot_random_seed=6304, bootstrap_iters=0,
                 )
                 samples = enrich_samples(name, results.pop("samples")[name], lm.generation_records)
-                ids = {row["doc_id"] for row in samples}
-                if len(samples) != TASKS[name][2] or len(ids) != TASKS[name][2]:
+                if len(samples) != TASKS[name][2]:
                     raise RuntimeError(f"Incomplete benchmark evaluation: {name}")
                 write_json(destination / f"{name}_results.json", json.loads(stable_json(results)))
                 with (destination / f"{name}_samples.jsonl").open("w") as stream:
                     for row in samples:
                         stream.write(stable_json(row) + "\n")
-                metrics, examples = results["results"][name], len(ids)
+                metrics, examples = results["results"][name], len(samples)
             aggregates[name] = {"primary": primary_score(name, metrics), "metrics": metrics,
                                 "examples": examples, "split": TASKS[name][1],
                                 "dataset_fingerprint": task.dataset[TASKS[name][1]]._fingerprint}
