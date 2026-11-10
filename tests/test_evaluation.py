@@ -106,7 +106,9 @@ def test_completed_benchmark_can_be_reused_only_when_all_samples_are_saved(tmp_p
     samples_path = tmp_path / f"{name}_samples.jsonl"
     with samples_path.open("w") as stream:
         for doc_id in range(TASKS[name][2]):
-            stream.write('{"doc_id": %d}\n' % doc_id)
+            # Stock harness tasks can reuse doc_id values; output row count is
+            # the integrity criterion, not uniqueness of that implementation ID.
+            stream.write('{"doc_id": 0, "example_index": %d}\n' % doc_id)
     assert completed_task_from_disk(tmp_path, name) == {"metrics": metrics, "examples": TASKS[name][2]}
     samples_path.write_text('{"doc_id": 0}\n')
     assert completed_task_from_disk(tmp_path, name) is None

@@ -36,6 +36,17 @@ Run all commands below from the repository root. The initial preparation/model
 load requires internet access to Hugging Face. No credentials are needed for
 these public repositories.
 
+Before a long training or evaluation run on Kaggle, use the preflight check:
+
+```bash
+python -m task1_finetuning.preflight --benchmarks --checkpoints
+```
+
+It checks CUDA and pinned package versions, verifies all prepared-data hashes,
+loads each pinned benchmark to confirm its expected full split size, and checks
+the layout of any existing recovery checkpoints. It does not train or generate
+benchmark answers.
+
 ## Task 1.1: prepare the shared data once
 
 ```bash
