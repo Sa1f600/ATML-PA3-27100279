@@ -7,6 +7,7 @@ from common.experiment import read_json, write_json
 from task2_vlm.data import read_json as read_manifest
 from task2_vlm.metrics import bootstrap_pair_difference, exact_score, vqa_soft_score
 from task2_vlm.model import Connector, VLM, install_lora
+from task2_vlm.train import _cap_tokens, _find_subsequence
 
 CONDITIONS=('correct','swap','mismatch','no_image')
 
@@ -21,10 +22,13 @@ def load_vlm(cfg, checkpoint):
 
 @torch.inference_mode()
 def generate(vlm, tokenizer, question, feature=None):
-    ids=torch.tensor(tokenizer.apply_chat_template([{'role':'user','content':question}],tokenize=True,add_generation_prompt=True,enable_thinking=False),device='cuda')[None]
+    question=_cap_tokens(tokenizer,question,80)
+    prompt=tokenizer.apply_chat_template([{'role':'user','content':question}],tokenize=True,add_generation_prompt=True,enable_thinking=False)
+    ids=torch.tensor(prompt,device='cuda')[None]
     embeds=vlm.language_model.get_input_embeddings()(ids); mask=torch.ones(ids.shape,device='cuda',dtype=torch.long)
     if feature is not None:
-        visual=vlm.connector(feature[None].cuda()).to(embeds.dtype); embeds=torch.cat((visual,embeds),1); mask=torch.ones(embeds.shape[:2],device='cuda',dtype=torch.long)
+        visual=vlm.connector(feature[None].cuda()).to(embeds.dtype); at=_find_subsequence(prompt,tokenizer(question,add_special_tokens=False).input_ids)
+        embeds=torch.cat((embeds[:,:at],visual,embeds[:,at:]),1); mask=torch.ones(embeds.shape[:2],device='cuda',dtype=torch.long)
     output=vlm.language_model.generate(inputs_embeds=embeds,attention_mask=mask,max_new_tokens=16,do_sample=False,pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(output[0],skip_special_tokens=True).strip()
 

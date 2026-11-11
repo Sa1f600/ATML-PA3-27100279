@@ -12,6 +12,11 @@ def main():
     if len(manifest['caption_train']) != 18000 or len(manifest['caption_dev']) != 96: raise RuntimeError('Caption split sizes are incorrect.')
     if len(manifest['natural_train']) != 3072 or len(manifest['natural_dev']) != 64 or len(manifest['natural_final']) != 192: raise RuntimeError('Natural VQA split sizes are incorrect.')
     if len(manifest['annotation_dev']) != 48 or len(manifest['annotation_final']) != 128: raise RuntimeError('Annotation evaluation split sizes are incorrect.')
+    train_images={r['image_id'] for key in ('caption_train','annotation_train','natural_train') for r in manifest[key]}
+    dev_images={r['image_id'] for key in ('caption_dev','annotation_dev','natural_dev') for r in manifest[key]}
+    final_images={r['image_id'] for key in ('annotation_final','natural_final') for r in manifest[key]}
+    if train_images & dev_images or train_images & final_images or dev_images & final_images:
+        raise RuntimeError('Task 2 train/development/final image-isolation check failed.')
     all_rows=[row for value in manifest.values() if isinstance(value,list) for row in value]
     if args.require_features:
         missing=[row['image_id'] for row in all_rows if not (Path(cfg['feature_dir'])/f"{row['image_id']}.pt").is_file()]

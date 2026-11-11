@@ -11,9 +11,10 @@ class Connector(nn.Module):
     def __init__(self, input_dim=768, hidden_dim=1024):
         super().__init__()
         self.layers = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim))
+        self.register_buffer("output_scale", torch.tensor(1.0, dtype=torch.float32))
 
     def forward(self, features):
-        return self.layers(features.float())
+        return self.output_scale * self.layers(features.float())
 
 
 class LoRALinear(nn.Module):

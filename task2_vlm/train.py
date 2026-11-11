@@ -9,18 +9,28 @@ from task2_vlm.model import Connector, VLM, install_lora
 
 STAGES = ('caption', 'grounding', 'natural')
 
+def _cap_tokens(tokenizer, text, limit):
+    ids=tokenizer(str(text),add_special_tokens=False).input_ids[:limit]
+    return tokenizer.decode(ids,skip_special_tokens=True)
+
+def _find_subsequence(haystack, needle):
+    for index in range(len(haystack)-len(needle)+1):
+        if haystack[index:index+len(needle)] == needle: return index
+    raise RuntimeError('Could not locate the user question in Qwen chat tokens.')
+
 def render(tokenizer, question, answer, max_target):
-    question = ' '.join(question.split()[:80]); answer = ' '.join(answer.split()[:max_target])
+    question = _cap_tokens(tokenizer, question, 80); answer = _cap_tokens(tokenizer, answer, max_target)
     prompt = tokenizer.apply_chat_template([{'role':'user','content':question}], tokenize=True, add_generation_prompt=True, enable_thinking=False)
     full = tokenizer.apply_chat_template([{'role':'user','content':question},{'role':'assistant','content':answer}], tokenize=True, add_generation_prompt=False, enable_thinking=False)
-    return torch.tensor(full), len(prompt)
+    question_ids=tokenizer(question,add_special_tokens=False).input_ids
+    return torch.tensor(full), len(prompt), _find_subsequence(prompt,question_ids)
 
 def collate(rows, tokenizer, feature_dir, device):
     encoded = [render(tokenizer, r.get('question','Describe this image.'), r.get('answer', r.get('caption','')), 64 if r['kind']=='caption' else 16) for r in rows]
-    length = max(len(ids) for ids,_ in encoded); ids = torch.full((len(rows),length), tokenizer.pad_token_id, dtype=torch.long, device=device); labels = torch.full_like(ids,-100); mask=torch.zeros_like(ids)
+    length = max(len(ids) for ids,_,_ in encoded); ids = torch.full((len(rows),length), tokenizer.pad_token_id, dtype=torch.long, device=device); labels = torch.full_like(ids,-100); mask=torch.zeros_like(ids)
     positions=[]
-    for i,(tokens,prompt) in enumerate(encoded):
-        ids[i,:len(tokens)]=tokens.to(device); mask[i,:len(tokens)]=1; labels[i,prompt:len(tokens)]=tokens[prompt:]; positions.append(0) # visual prefix is inserted before chat tokens
+    for i,(tokens,prompt,visual_position) in enumerate(encoded):
+        ids[i,:len(tokens)]=tokens.to(device); mask[i,:len(tokens)]=1; labels[i,prompt:len(tokens)]=tokens[prompt:]; positions.append(visual_position)
     features=torch.stack([torch.load(Path(feature_dir)/f"{r['image_id']}.pt", map_location='cpu', weights_only=True) for r in rows]).to(device)
     return dict(input_ids=ids, attention_mask=mask, position_ids=torch.arange(length,device=device).expand(len(rows),-1), labels=labels, visual_features=features, visual_positions=positions)
 
@@ -40,10 +50,10 @@ def stage_rows(manifest, stage, rng):
                 else: yield random.choice(rows); yield random.choice(rows)
                 break
 
-def checkpoint(path, vlm, optimizer, scaler, state, cfg):
+def checkpoint(path, vlm, optimizer, scaler, state, sampler_rng, cfg):
     if path.exists(): raise FileExistsError(path)
     tmp=path.with_name(path.name+'.saving'); tmp.mkdir(parents=True,exist_ok=False)
-    torch.save({'connector':vlm.connector.state_dict(),'model':{n:p.detach().cpu() for n,p in vlm.language_model.named_parameters() if '.a.weight' in n or '.b.weight' in n},'optimizer':optimizer.state_dict(),'scaler':scaler.state_dict(),'state':state,'rng':capture_rng()},tmp/'trainer.pt')
+    torch.save({'connector':vlm.connector.state_dict(),'model':{n:p.detach().cpu() for n,p in vlm.language_model.named_parameters() if '.a.weight' in n or '.b.weight' in n},'optimizer':optimizer.state_dict(),'scaler':scaler.state_dict(),'state':state,'rng':capture_rng(),'sampler_rng':sampler_rng.getstate()},tmp/'trainer.pt')
     write_json(tmp/'config.json',cfg); tmp.rename(path)
 
 def main():
@@ -61,7 +71,7 @@ def main():
         connector.load_state_dict(saved['connector'])
         for name, parameter in base.named_parameters():
             if name in saved['model']: parameter.data.copy_(saved['model'][name].to(parameter))
-        restore_rng(saved['rng'])
+        restore_rng(saved['rng']); rng.setstate(saved['sampler_rng'])
     results=Path(cfg['results_dir']); results.mkdir(parents=True,exist_ok=True)
     for stage_index in range(state['stage_index'],len(STAGES)):
         stage=STAGES[stage_index]; spec=cfg['stages'][stage]
@@ -83,7 +93,7 @@ def main():
                 scaler.scale(loss).backward(); losses.append(loss.item()*cfg['gradient_accumulation']); state['examples_seen']+=len(rows)
             scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(params,cfg['gradient_clip_norm']); scaler.step(optimizer); scaler.update(); state.update(stage_index=stage_index,stage_update=update+1,global_update=state['global_update']+1)
             with (results/'training.jsonl').open('a') as f: f.write(json.dumps({'stage':stage,'global_update':state['global_update'],'stage_update':update+1,'loss':sum(losses)/len(losses),'connector_lr':optimizer.param_groups[0]['lr'],'lora_lr':optimizer.param_groups[-1]['lr'] if stage!='caption' else 0,'examples_seen':state['examples_seen'],'time':time.time()})+'\n')
-            if state['global_update']%250==0 or update+1==spec['updates']: checkpoint(Path(cfg['checkpoint_dir'])/f"update_{state['global_update']:04d}",vlm,optimizer,scaler,state,cfg)
+            if state['global_update']%250==0 or update+1==spec['updates']: checkpoint(Path(cfg['checkpoint_dir'])/f"update_{state['global_update']:04d}",vlm,optimizer,scaler,state,rng,cfg)
         state['stage_index']=stage_index+1; state['stage_update']=0
     print('Task 2 curriculum complete.')
 if __name__=='__main__': main()

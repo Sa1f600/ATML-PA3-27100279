@@ -17,3 +17,9 @@ def test_connector_preserves_visual_sequence_shape():
     import torch
     connector=Connector(); out=connector(torch.zeros(2,196,768))
     assert out.shape==(2,196,1024)
+
+def test_connector_scale_is_applied():
+    import torch
+    connector=Connector(); connector.output_scale.fill_(2)
+    x=torch.zeros(1,196,768)
+    assert torch.allclose(connector(x),2*connector.layers(x))
