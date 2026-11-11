@@ -1,6 +1,7 @@
 import pytest
 from task2_vlm.metrics import bootstrap_pair_difference, exact_score, normalize_answer, vqa_soft_score
 from task2_vlm.model import Connector
+from task2_vlm.train import CurriculumSampler
 
 def test_vqa_normalization_and_soft_consensus():
     assert normalize_answer('The, Two!') == '2'
@@ -23,3 +24,12 @@ def test_connector_scale_is_applied():
     connector=Connector(); connector.output_scale.fill_(2)
     x=torch.zeros(1,196,768)
     assert torch.allclose(connector(x),2*connector.layers(x))
+
+def test_curriculum_sampler_restores_the_exact_next_examples():
+    captions=[{'image_id':i,'kind':'caption','caption':str(i)} for i in range(8)]
+    pairs=[{'image_id':10,'kind':'presence','pair_id':'p','question':'q','answer':'yes'}, {'image_id':11,'kind':'presence','pair_id':'p','question':'q','answer':'no'}, {'image_id':12,'kind':'counting','pair_id':'c','question':'q','answer':'1'}, {'image_id':13,'kind':'counting','pair_id':'c','question':'q','answer':'2'}]
+    manifest={'caption_train':captions,'annotation_train':pairs,'natural_train':pairs}
+    first=CurriculumSampler(manifest,'grounding',6304)
+    first.next_examples(8); saved=first.state_dict(); expected=first.next_examples(8)
+    resumed=CurriculumSampler(manifest,'grounding',6304); resumed.load_state_dict(saved)
+    assert resumed.next_examples(8)==expected
