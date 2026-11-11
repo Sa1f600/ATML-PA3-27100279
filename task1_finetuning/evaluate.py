@@ -222,6 +222,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=EVAL_CONFIG)
     parser.add_argument("--condition", choices=["all", *CONDITIONS], default="all")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="Run two GSM8K examples and save only under evaluation/smoke/.")
     args = parser.parse_args()
     cfg = read_json(args.config)
     if not torch.cuda.is_available():
@@ -230,8 +232,11 @@ def main():
     manager, lock = benchmark_lock(cfg)
     from lm_eval import simple_evaluate
     recording_class = recording_hflm_class()
-    for condition in CONDITIONS if args.condition == "all" else [args.condition]:
-        destination = Path(cfg["results_dir"]) / condition
+    conditions = CONDITIONS if args.condition == "all" else [args.condition]
+    if args.smoke_test and args.condition == "all":
+        raise ValueError("Choose one --condition for a smoke test.")
+    for condition in conditions:
+        destination = Path(cfg["results_dir"]) / ("smoke" if args.smoke_test else "") / condition
         provenance = condition_provenance(condition, cfg)
         contract = {"model": provenance, "benchmark_lock": lock, "num_fewshot": 0,
                     "gsm8k_max_new_tokens": cfg["gsm8k_max_new_tokens"], "dtype": "float16"}
@@ -252,7 +257,7 @@ def main():
                              enable_thinking=False, chat_template_args={"enable_thinking": False})
         aggregates = {}
         started = time.perf_counter()
-        for name in TASKS:
+        for name in (("gsm8k_cot",) if args.smoke_test else TASKS):
             task = load_benchmark_task(name, manager, lock)
             recovered = completed_task_from_disk(destination, name)
             if recovered is not None:
@@ -262,7 +267,7 @@ def main():
                 print(f"Starting benchmark: {condition}/{name}", flush=True)
                 lm.set_progress_label(f"{condition}/{name}")
                 results = simple_evaluate(
-                    model=lm, tasks=[task], num_fewshot=0, limit=None, log_samples=True,
+                    model=lm, tasks=[task], num_fewshot=0, limit=2 if args.smoke_test else None, log_samples=True,
                     apply_chat_template=name == "gsm8k_cot",
                     gen_kwargs={"do_sample": False, "max_gen_toks": cfg["gsm8k_max_new_tokens"]}
                                if name == "gsm8k_cot" else None,
@@ -279,7 +284,7 @@ def main():
                 expected = TASKS[name][2]
                 generation_records = len(lm.generation_records) if name == "gsm8k_cot" else None
                 write_json(destination / f"{name}_sample_diagnostics.json", {
-                    "expected_examples": expected,
+                    "expected_examples": 2 if args.smoke_test else expected,
                     "returned_harness_samples": returned,
                     "generation_records": generation_records,
                     "complete_split_evaluated": True,
