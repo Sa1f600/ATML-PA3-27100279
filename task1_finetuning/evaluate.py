@@ -209,7 +209,12 @@ def completed_task_from_disk(destination, name):
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
     if len(samples) != TASKS[name][2]:
-        return None
+        diagnostic = destination / f"{name}_sample_diagnostics.json"
+        if not diagnostic.exists():
+            return None
+        saved = read_json(diagnostic)
+        if not (saved.get("complete_split_evaluated") and saved.get("returned_harness_samples") == len(samples)):
+            return None
     return {"metrics": metrics, "examples": len(samples)}
 
 
