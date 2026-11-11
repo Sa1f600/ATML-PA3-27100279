@@ -1,7 +1,7 @@
 import pytest
 from task2_vlm.metrics import bootstrap_pair_difference, exact_score, normalize_answer, vqa_soft_score
 from task2_vlm.model import Connector
-from task2_vlm.train import CurriculumSampler
+from task2_vlm.train import CurriculumSampler, gradients_are_finite
 from task2_vlm.data import annotation_pairs, complementary_pairs, consensus
 
 def test_vqa_normalization_and_soft_consensus():
@@ -64,3 +64,12 @@ def test_annotation_pair_builder_uses_indexes_and_keeps_eval_images_disjoint():
     assert len(rows) == 4  # one presence pair and one counting pair
     assert len({row["image_id"] for row in rows}) == 4
     assert {row["kind"] for row in rows} == {"presence", "counting"}
+
+
+def test_gradient_finiteness_guard_detects_overflow_before_a_step():
+    import torch
+    parameter = torch.nn.Parameter(torch.ones(1))
+    parameter.grad = torch.tensor([1.0])
+    assert gradients_are_finite([parameter])
+    parameter.grad = torch.tensor([float("inf")])
+    assert not gradients_are_finite([parameter])

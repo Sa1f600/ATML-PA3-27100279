@@ -1,5 +1,5 @@
 """Three-stage curriculum training with resumable connector/LoRA checkpoints."""
-import argparse, json, random, time
+import argparse, copy, json, random, time
 from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -8,6 +8,11 @@ from task2_vlm.data import read_json as read_manifest
 from task2_vlm.model import Connector, VLM, install_lora
 
 STAGES = ('caption', 'grounding', 'natural')
+
+
+def gradients_are_finite(parameters):
+    """Check unscaled gradients before clipping or advancing sampler state."""
+    return all(parameter.grad is None or torch.isfinite(parameter.grad).all().item() for parameter in parameters)
 
 def _cap_tokens(tokenizer, text, limit):
     ids=tokenizer(str(text),add_special_tokens=False).input_ids[:limit]
@@ -112,7 +117,7 @@ def main():
     tokenizer=AutoTokenizer.from_pretrained(cfg['model_id']); tokenizer.pad_token=tokenizer.eos_token
     base=AutoModelForCausalLM.from_pretrained(cfg['model_id'],torch_dtype=torch.float16).to(device); base.gradient_checkpointing_enable(); base.requires_grad_(False)
     connector=Connector(cfg['feature_dim'],cfg['hidden_dim']).to(device); vlm=VLM(base,connector); targets=[]
-    state={'stage_index':0,'stage_update':0,'global_update':0,'examples_seen':0}; scaler=torch.amp.GradScaler('cuda')
+    state={'stage_index':0,'stage_update':0,'global_update':0,'examples_seen':0}; scaler=torch.amp.GradScaler('cuda',init_scale=256.0)
     saved=None
     if args.resume:
         saved=torch.load(args.resume/'trainer.pt',map_location='cpu',weights_only=False); state=saved['state']
@@ -143,13 +148,29 @@ def main():
             warmup=max(1,round(.05*spec['updates'])); progress=(update+1)/spec['updates']
             scale=(update+1)/warmup if update<warmup else .1+.9*.5*(1+__import__('math').cos(__import__('math').pi*(update+1-warmup)/(spec['updates']-warmup)))
             for group, peak in zip(optimizer.param_groups,[spec['connector_lr'],spec['lora_lr']]): group['lr']=peak*scale
-            optimizer.zero_grad(set_to_none=True); losses=[]
-            for _ in range(cfg['gradient_accumulation']):
-                rows=sampler.next_examples(cfg['microbatch_size']); batch=collate(rows,tokenizer,cfg['feature_dir'],device)
-                with torch.autocast('cuda',torch.float16): loss=vlm(**batch).loss/cfg['gradient_accumulation']
-                scaler.scale(loss).backward(); losses.append(loss.item()*cfg['gradient_accumulation']); state['examples_seen']+=len(rows)
-            scaler.unscale_(optimizer); torch.nn.utils.clip_grad_norm_(params,cfg['gradient_clip_norm']); scaler.step(optimizer); scaler.update(); state.update(stage_index=stage_index,stage_update=update+1,global_update=state['global_update']+1)
-            with (results/'training.jsonl').open('a') as f: f.write(json.dumps({'stage':stage,'global_update':state['global_update'],'stage_update':update+1,'loss':sum(losses)/len(losses),'connector_lr':optimizer.param_groups[0]['lr'],'lora_lr':optimizer.param_groups[-1]['lr'] if stage!='caption' else 0,'examples_seen':state['examples_seen'],'time':time.time()})+'\n')
+            overflow_retries=0
+            while True:
+                # An AMP overflow must not consume sampler examples or an LR
+                # step.  Restoring this state makes the retry reproducible.
+                sampler_before=copy.deepcopy(sampler.state_dict())
+                optimizer.zero_grad(set_to_none=True); losses=[]; presentations=0
+                for _ in range(cfg['gradient_accumulation']):
+                    rows=sampler.next_examples(cfg['microbatch_size']); batch=collate(rows,tokenizer,cfg['feature_dir'],device)
+                    with torch.autocast('cuda',torch.float16): loss=vlm(**batch).loss/cfg['gradient_accumulation']
+                    if not torch.isfinite(loss): raise RuntimeError(f'Non-finite training loss at update {state["global_update"] + 1}.')
+                    scaler.scale(loss).backward(); losses.append(loss.item()*cfg['gradient_accumulation']); presentations+=len(rows)
+                scaler.unscale_(optimizer)
+                if not gradients_are_finite(params):
+                    optimizer.zero_grad(set_to_none=True); sampler.load_state_dict(sampler_before); overflow_retries+=1
+                    if overflow_retries > 8: raise RuntimeError(f'AMP gradients remained non-finite after eight retries at update {state["global_update"] + 1}.')
+                    new_scale=max(1.0,scaler.get_scale()/2); scaler.update(new_scale=new_scale)
+                    print(f'Gradient overflow at update {state["global_update"] + 1}; retrying with AMP scale {new_scale:.0f}.',flush=True)
+                    continue
+                gradient_norm=float(torch.nn.utils.clip_grad_norm_(params,cfg['gradient_clip_norm']))
+                scaler.step(optimizer); scaler.update()
+                state.update(stage_index=stage_index,stage_update=update+1,global_update=state['global_update']+1,examples_seen=state['examples_seen']+presentations)
+                break
+            with (results/'training.jsonl').open('a') as f: f.write(json.dumps({'stage':stage,'global_update':state['global_update'],'stage_update':update+1,'loss':sum(losses)/len(losses),'connector_lr':optimizer.param_groups[0]['lr'],'lora_lr':optimizer.param_groups[-1]['lr'] if stage!='caption' else 0,'examples_seen':state['examples_seen'],'gradient_norm':gradient_norm,'overflow_retries':overflow_retries,'amp_scale':scaler.get_scale(),'time':time.time()})+'\n')
             endpoint=update+1==spec['updates']
             if state['global_update']%250==0 or endpoint:
                 path=Path(cfg['checkpoint_dir'])/f"update_{state['global_update']:04d}"; checkpoint(path,vlm,optimizer,scaler,state,sampler,cfg)
