@@ -31,7 +31,7 @@ def collate(rows, tokenizer, feature_dir, device):
     positions=[]
     for i,(tokens,prompt,visual_position) in enumerate(encoded):
         ids[i,:len(tokens)]=tokens.to(device); mask[i,:len(tokens)]=1; labels[i,prompt:len(tokens)]=tokens[prompt:]; positions.append(visual_position)
-    features=torch.stack([torch.load(Path(feature_dir)/f"{r['image_id']}.pt", map_location='cpu', weights_only=True) for r in rows]).to(device)
+    features=torch.stack([torch.zeros(196,768,dtype=torch.float16) if r['image_id'] is None else torch.load(Path(feature_dir)/f"{r['image_id']}.pt", map_location='cpu', weights_only=True) for r in rows]).to(device)
     return dict(input_ids=ids, attention_mask=mask, position_ids=torch.arange(length,device=device).expand(len(rows),-1), labels=labels, visual_features=features, visual_positions=positions)
 
 def stage_rows(manifest, stage, rng):
