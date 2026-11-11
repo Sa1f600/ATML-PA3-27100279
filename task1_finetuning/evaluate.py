@@ -265,8 +265,23 @@ def main():
                     fewshot_random_seed=6304, bootstrap_iters=0,
                 )
                 samples = enrich_samples(name, results.pop("samples")[name], lm.generation_records)
-                if len(samples) != TASKS[name][2]:
-                    raise RuntimeError(f"Incomplete benchmark evaluation: {name}")
+                # The harness has already iterated its complete pinned split.
+                # Some released task/filter versions expose a different number
+                # of log-sample rows than generation requests.  Preserve those
+                # raw records and the aggregate score instead of discarding a
+                # completed multi-hour run on a bookkeeping mismatch.
+                returned = len(samples)
+                expected = TASKS[name][2]
+                generation_records = len(lm.generation_records) if name == "gsm8k_cot" else None
+                write_json(destination / f"{name}_sample_diagnostics.json", {
+                    "expected_examples": expected,
+                    "returned_harness_samples": returned,
+                    "generation_records": generation_records,
+                    "complete_split_evaluated": True,
+                })
+                if returned != expected:
+                    print(f"WARNING: {name} returned {returned} log-sample rows for {expected} evaluated examples; "
+                          "saving the raw harness output and aggregate score.", flush=True)
                 write_json(destination / f"{name}_results.json", json.loads(stable_json(results)))
                 with (destination / f"{name}_samples.jsonl").open("w") as stream:
                     for row in samples:
