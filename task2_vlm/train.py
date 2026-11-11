@@ -99,16 +99,21 @@ def calibrate_connector(connector, base, manifest, cfg):
 
 @torch.inference_mode()
 def development_metrics(vlm, tokenizer, manifest, cfg):
+    was_training = vlm.training
+    vlm.eval()
     def nll(row, image_id):
         sample=dict(row); sample['image_id']=image_id
         batch=collate([sample],tokenizer,cfg['feature_dir'],'cuda')
         if image_id is None: batch['visual_features']=None; batch['visual_positions']=None
         return float(vlm(**batch).loss)
-    result={'caption_reference_loss':sum(nll(row,row['image_id']) for row in manifest['caption_dev'])/len(manifest['caption_dev'])}
-    for suite,key in (('annotation','annotation_dev'),('natural','natural_dev')):
-        correct=[nll(row,row['image_id']) for row in manifest[key]]; swap=[nll(row,row['partner_image_id']) for row in manifest[key]]; no_image=[nll(row,None) for row in manifest[key]]
-        result[f'{suite}_answer_nll']={'correct':sum(correct)/len(correct),'swap':sum(swap)/len(swap),'no_image':sum(no_image)/len(no_image),'swap_penalty':sum(b-a for a,b in zip(correct,swap))/len(correct)}
-    return result
+    try:
+        result={'caption_reference_loss':sum(nll(row,row['image_id']) for row in manifest['caption_dev'])/len(manifest['caption_dev'])}
+        for suite,key in (('annotation','annotation_dev'),('natural','natural_dev')):
+            correct=[nll(row,row['image_id']) for row in manifest[key]]; swap=[nll(row,row['partner_image_id']) for row in manifest[key]]; no_image=[nll(row,None) for row in manifest[key]]
+            result[f'{suite}_answer_nll']={'correct':sum(correct)/len(correct),'swap':sum(swap)/len(swap),'no_image':sum(no_image)/len(no_image),'swap_penalty':sum(b-a for a,b in zip(correct,swap))/len(correct)}
+        return result
+    finally:
+        vlm.train(was_training)
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument('--config',default='configs/task2/vlm_196.json'); p.add_argument('--resume',type=Path); args=p.parse_args(); cfg=read_json(args.config)
@@ -116,7 +121,7 @@ def main():
     seed_everything(cfg['seed']); device='cuda'; manifest=read_manifest(Path(cfg['prepared_dir'])/'manifest.json')
     tokenizer=AutoTokenizer.from_pretrained(cfg['model_id']); tokenizer.pad_token=tokenizer.eos_token
     base=AutoModelForCausalLM.from_pretrained(cfg['model_id'],torch_dtype=torch.float16).to(device); base.gradient_checkpointing_enable(); base.requires_grad_(False)
-    connector=Connector(cfg['feature_dim'],cfg['hidden_dim']).to(device); vlm=VLM(base,connector); targets=[]
+    connector=Connector(cfg['feature_dim'],cfg['hidden_dim']).to(device); vlm=VLM(base,connector).train(); targets=[]
     state={'stage_index':0,'stage_update':0,'global_update':0,'examples_seen':0}; scaler=torch.amp.GradScaler('cuda',init_scale=256.0)
     saved=None
     if args.resume:
@@ -177,9 +182,12 @@ def main():
                 if endpoint:
                     torch.save(vlm.connector.state_dict(),path/'connector.pt')
                     torch.save({name:p.detach().cpu() for name,p in base.named_parameters() if p.requires_grad},path/'adapter.pt')
+                print(f"Saved resumable checkpoint: {path}",flush=True)
             if state['global_update']%500==0 or endpoint:
                 log_development(f"update_{state['global_update']:04d}")
                 write_json(results/'resources.json',{'global_update':state['global_update'],'stage':stage,'training_seconds':time.perf_counter()-started,'peak_gpu_memory_bytes':torch.cuda.max_memory_allocated(),'trainable_parameters':sum(p.numel() for p in params)})
+            if state['global_update'] % 25 == 0 or endpoint:
+                print(f"Progress: stage={stage}, update={state['global_update']}/4500, loss={sum(losses)/len(losses):.4f}, AMP scale={scaler.get_scale():.0f}",flush=True)
         state['stage_index']=stage_index+1; state['stage_update']=0
     print('Task 2 curriculum complete.')
 if __name__=='__main__': main()
