@@ -16,65 +16,148 @@ def image_path(coco_root, split, image_id):
     return str(Path(coco_root) / split / f"COCO_{split}_{int(image_id):012d}.jpg")
 
 def consensus(annotation):
+    """Return an original consensus answer, its agreement count, and all answers."""
     values = [answer["answer"] for answer in annotation["answers"]]
     counts = Counter(normalize_answer(value) for value in values)
-    answer, count = counts.most_common(1)[0]
-    return answer, count, values
+    normalized, count = counts.most_common(1)[0]
+    # VQAv2 scoring normalizes answers, but the assignment specifies that the
+    # training target should be an original answer string from the consensus set.
+    target = next(value for value in values if normalize_answer(value) == normalized)
+    return target, count, values
 
-def complementary_pairs(questions, annotations, wanted, used_images, seed):
-    """Select image-disjoint same-question pairs with >=8/10 consensus on both images."""
+
+def complementary_pairs(questions, annotations, wanted, used_images, seed, *, enforce_disjoint=True, label="VQAv2"):
+    """Select same-question VQAv2 pairs without materialising all O(n²) pairs.
+
+    The old implementation built every possible pair for a repeated question.
+    Some common questions have thousands of answers, which made preparation take
+    effectively forever.  We instead index entries by question/type/answer and
+    greedily draw one valid pair per group in successive deterministic passes.
+    """
+    print(f"Indexing {label} questions and consensus answers...", flush=True)
     answers = {row["question_id"]: row for row in annotations["annotations"]}
-    groups = defaultdict(list)
+    grouped = {"yes/no": defaultdict(lambda: defaultdict(list)), "number": defaultdict(lambda: defaultdict(list)), "other": defaultdict(lambda: defaultdict(list))}
+    accepted = 0
     for row in questions["questions"]:
         ann = answers.get(row["question_id"])
-        if not ann: continue
+        if not ann:
+            continue
         target, agreement, all_answers = consensus(ann)
-        if agreement >= 8: groups[normalize_answer(row["question"])].append({"image_id": row["image_id"], "question_id": row["question_id"], "question": row["question"], "answer": target, "answers": all_answers, "answer_type": ann.get("answer_type", "other")})
-    candidates = []
-    for question, entries in groups.items():
-        for left in entries:
-            for right in entries:
-                if left["image_id"] < right["image_id"] and left["answer"] != right["answer"]:
-                    candidates.append((question, left, right))
-    rng = random.Random(seed); rng.shuffle(candidates); output = []
+        if agreement < 8:
+            continue
+        answer_type = ann.get("answer_type", "other")
+        kind = answer_type if answer_type in grouped else "other"
+        entry = {"image_id": row["image_id"], "question_id": row["question_id"], "question": row["question"], "answer": target, "answers": all_answers, "answer_type": kind}
+        grouped[kind][normalize_answer(row["question"])][normalize_answer(target)].append(entry)
+        accepted += 1
+    print(f"Indexed {accepted:,} high-agreement {label} examples; selecting complementary pairs...", flush=True)
+
+    rng = random.Random(seed)
     quotas = {"yes/no": wanted["yesno"], "number": wanted["number"], "other": wanted["other"]}
-    for question, left, right in candidates:
-        kind = left["answer_type"] if left["answer_type"] in quotas else "other"
-        if quotas[kind] <= 0 or left["image_id"] in used_images or right["image_id"] in used_images: continue
-        pair_id = f"vqa-{left['question_id']}-{right['question_id']}"
-        for side, partner in ((left, right), (right, left)):
-            output.append({**side, "pair_id": pair_id, "partner_image_id": partner["image_id"], "kind": "natural"})
-        quotas[kind] -= 1; used_images.update((left["image_id"], right["image_id"]))
-        if not any(quotas.values()): break
-    if any(quotas.values()): raise RuntimeError(f"Insufficient complementary VQA pairs: {quotas}")
+    output = []
+    selected_pair_ids = set()
+    for kind, quota in quotas.items():
+        groups = [answers_by_value for answers_by_value in grouped[kind].values() if len(answers_by_value) >= 2]
+        rng.shuffle(groups)
+        selected = 0
+        while selected < quota:
+            made_progress = False
+            for answers_by_value in groups:
+                available_by_answer = {
+                    answer: [entry for entry in entries if not enforce_disjoint or entry["image_id"] not in used_images]
+                    for answer, entries in answers_by_value.items()
+                }
+                available_answers = [answer for answer, entries in available_by_answer.items() if entries]
+                if len(available_answers) < 2:
+                    continue
+                left_answer, right_answer = rng.sample(available_answers, 2)
+                left, right = rng.choice(available_by_answer[left_answer]), rng.choice(available_by_answer[right_answer])
+                if left["image_id"] == right["image_id"]:
+                    continue
+                pair_id = f"vqa-{left['question_id']}-{right['question_id']}"
+                if pair_id in selected_pair_ids:
+                    continue
+                for side, partner in ((left, right), (right, left)):
+                    output.append({**side, "pair_id": pair_id, "partner_image_id": partner["image_id"], "kind": "natural"})
+                selected_pair_ids.add(pair_id)
+                if enforce_disjoint:
+                    used_images.update((left["image_id"], right["image_id"]))
+                selected += 1
+                made_progress = True
+                if selected % 100 == 0 or selected == quota:
+                    print(f"  {label} {kind}: {selected}/{quota} pairs", flush=True)
+                if selected == quota:
+                    break
+            if not made_progress:
+                raise RuntimeError(f"Insufficient complementary {label} pairs for {kind}: selected {selected}/{quota}.")
     return output
 
-def annotation_pairs(instances, image_ids, wanted_pairs, used_images, seed):
-    """Create balanced reusable presence/counting pairs from COCO instance annotations."""
+
+def annotation_pairs(instances, image_ids, wanted_pairs, used_images, seed, *, enforce_disjoint=True, label="COCO"):
+    """Create reusable presence/counting pairs using precomputed image indexes."""
+    print(f"Indexing {label} object annotations for presence/counting pairs...", flush=True)
     by_image = defaultdict(Counter)
-    for ann in instances["annotations"]: by_image[ann["image_id"]][ann["category_id"]] += 1
-    categories = {row["id"]: row["name"] for row in instances["categories"]}; available = sorted(set(image_ids) - set(used_images))
-    rng = random.Random(seed); rows = []
-    for index in range(wanted_pairs):
-        category = sorted(categories)[index % len(categories)]
-        positives = [i for i in available if by_image[i][category] > 0]
-        negatives = [i for i in available if by_image[i][category] == 0]
-        if not positives or not negatives: continue
-        yes, no = rng.choice(positives), rng.choice(negatives)
-        if yes in used_images or no in used_images: continue
-        pair_id = f"presence-{category}-{yes}-{no}"; question = f"Does this image contain {categories[category]}?"
-        rows += [{"image_id": yes, "partner_image_id": no, "pair_id": pair_id, "question": question, "answer": "yes", "kind": "presence"}, {"image_id": no, "partner_image_id": yes, "pair_id": pair_id, "question": question, "answer": "no", "kind": "presence"}]
-        used_images.update((yes, no))
-    for index in range(wanted_pairs):
-        category = sorted(categories)[index % len(categories)]
-        buckets = {count: [i for i in available if by_image[i][category] == count and i not in used_images] for count in range(1, 5)}
-        counts = [count for count, values in buckets.items() if values]
-        if len(counts) < 2: continue
-        first, second = rng.sample(counts, 2); left, right = rng.choice(buckets[first]), rng.choice(buckets[second])
-        pair_id = f"count-{category}-{left}-{right}"; question = f"How many {categories[category]} can you see?"
-        rows += [{"image_id": left, "partner_image_id": right, "pair_id": pair_id, "question": question, "answer": str(first), "kind": "counting"}, {"image_id": right, "partner_image_id": left, "pair_id": pair_id, "question": question, "answer": str(second), "kind": "counting"}]
-        used_images.update((left, right))
-    if len(rows) < 2 * wanted_pairs: raise RuntimeError("Insufficient annotation-derived pairs after image-disjoint filtering.")
+    for ann in instances["annotations"]:
+        by_image[ann["image_id"]][ann["category_id"]] += 1
+    categories = {row["id"]: row["name"] for row in instances["categories"]}
+    category_ids = sorted(categories)
+    available = sorted(set(image_ids))
+
+    # Construct these indexes once.  The previous code rebuilt 1--4 count
+    # buckets by scanning every COCO image for every requested pair.
+    positives = {category: [] for category in category_ids}
+    by_count = {category: {count: [] for count in range(1, 5)} for category in category_ids}
+    for image_id, counts in by_image.items():
+        for category, count in counts.items():
+            if category not in positives:
+                continue
+            positives[category].append(image_id)
+            if 1 <= count <= 4:
+                by_count[category][count].append(image_id)
+    positive_sets = {category: set(ids) for category, ids in positives.items()}
+    negatives = {category: [image_id for image_id in available if image_id not in positive_sets[category]] for category in category_ids}
+
+    def available_values(values):
+        return values if not enforce_disjoint else [image_id for image_id in values if image_id not in used_images]
+
+    def choose(values):
+        candidates = available_values(values)
+        return rng.choice(candidates) if candidates else None
+
+    rng = random.Random(seed)
+    rows = []
+    for kind in ("presence", "counting"):
+        selected = 0
+        attempts = 0
+        while selected < wanted_pairs:
+            if attempts >= len(category_ids) * (wanted_pairs + 1):
+                raise RuntimeError(f"Insufficient {label} {kind} pairs after image-disjoint filtering.")
+            category = category_ids[attempts % len(category_ids)]
+            attempts += 1
+            if kind == "presence":
+                left, right = choose(positives[category]), choose(negatives[category])
+                answers = ("yes", "no")
+                question = f"Does this image contain {categories[category]}?"
+            else:
+                counts = [count for count, values in by_count[category].items() if available_values(values)]
+                if len(counts) < 2:
+                    continue
+                first, second = rng.sample(counts, 2)
+                left, right = choose(by_count[category][first]), choose(by_count[category][second])
+                answers = (str(first), str(second))
+                question = f"How many {categories[category]} can you see?"
+            if left is None or right is None or left == right:
+                continue
+            pair_id = f"{kind}-{category}-{left}-{right}"
+            rows += [
+                {"image_id": left, "partner_image_id": right, "pair_id": pair_id, "question": question, "answer": answers[0], "kind": kind},
+                {"image_id": right, "partner_image_id": left, "pair_id": pair_id, "question": question, "answer": answers[1], "kind": kind},
+            ]
+            if enforce_disjoint:
+                used_images.update((left, right))
+            selected += 1
+            if selected % 100 == 0 or selected == wanted_pairs:
+                print(f"  {label} {kind}: {selected}/{wanted_pairs} pairs", flush=True)
     return rows
 
 def write_json(path, value):
@@ -83,6 +166,7 @@ def write_json(path, value):
 def prepare_manifests(cfg):
     coco, vqa, out = Path(cfg["coco_root"]), Path(cfg["vqa_root"]), Path(cfg["prepared_dir"])
     if out.exists(): raise FileExistsError(f"{out} exists; do not silently change selected splits.")
+    print("Loading COCO captions and instance annotations...", flush=True)
     cap_train, cap_val = read_json(coco/"annotations/captions_train2014.json"), read_json(coco/"annotations/captions_val2014.json")
     ins_train, ins_val = read_json(coco/"annotations/instances_train2014.json"), read_json(coco/"annotations/instances_val2014.json")
     captions = defaultdict(list)
@@ -91,22 +175,30 @@ def prepare_manifests(cfg):
     train_caption = [{"image_id": i, "caption": text, "kind": "caption"} for i in train_images for text in captions[i][:3]]
     val_captions = defaultdict(list)
     for row in cap_val["annotations"]: val_captions[row["image_id"]].append(row["caption"])
-    used_dev, used_final = set(), set(); dev_caption_ids = [i for i in sorted(val_captions) if i not in used_final][:96]; used_dev.update(dev_caption_ids)
+    # Evaluation images must be disjoint across both suites and from one
+    # another. Training images may recur across curriculum components.
+    evaluation_used = set()
+    dev_caption_ids = sorted(val_captions)[:96]; evaluation_used.update(dev_caption_ids)
     dev_caption = [{"image_id": i, "caption": val_captions[i][0], "kind": "caption"} for i in dev_caption_ids]
     def vqa_files(split):
         tag = "train2014" if split == "train2014" else "val2014"
         return read_json(vqa/f"v2_OpenEnded_mscoco_{tag}_questions.json"), read_json(vqa/f"v2_mscoco_{tag}_annotations.json")
+    print("Loading VQAv2 questions and annotations...", flush=True)
     qtrain, atrain = vqa_files("train2014"); qval, aval = vqa_files("val2014")
-    natural_train = complementary_pairs(qtrain, atrain, {"yesno":640,"number":256,"other":640}, set(train_images), cfg["seed"])
-    natural_dev = complementary_pairs(qval, aval, {"yesno":12,"number":8,"other":12}, used_dev, cfg["seed"]+1)
-    natural_final = complementary_pairs(qval, aval, {"yesno":36,"number":24,"other":36}, used_dev | used_final, cfg["seed"]+2); used_final.update(row["image_id"] for row in natural_final)
-    annotation_train = annotation_pairs(ins_train, [row["id"] for row in ins_train["images"]], 3000, set(train_images), cfg["seed"]+3)
-    annotation_dev = annotation_pairs(ins_val, [row["id"] for row in ins_val["images"]], 12, used_dev, cfg["seed"]+4)
-    annotation_final = annotation_pairs(ins_val, [row["id"] for row in ins_val["images"]], 32, used_dev | used_final, cfg["seed"]+5)
+    natural_train = complementary_pairs(qtrain, atrain, {"yesno":640,"number":256,"other":640}, set(), cfg["seed"], enforce_disjoint=False, label="training VQAv2")
+    natural_dev = complementary_pairs(qval, aval, {"yesno":12,"number":8,"other":12}, evaluation_used, cfg["seed"]+1, label="development VQAv2")
+    natural_final = complementary_pairs(qval, aval, {"yesno":36,"number":24,"other":36}, evaluation_used, cfg["seed"]+2, label="final VQAv2")
+    # Each call yields `wanted_pairs` presence pairs and `wanted_pairs`
+    # counting pairs: 24/64 pairs for development/final as specified.
+    annotation_train = annotation_pairs(ins_train, [row["id"] for row in ins_train["images"]], 3000, set(), cfg["seed"]+3, enforce_disjoint=False, label="training COCO")
+    annotation_dev = annotation_pairs(ins_val, [row["id"] for row in ins_val["images"]], 12, evaluation_used, cfg["seed"]+4, label="development COCO")
+    annotation_final = annotation_pairs(ins_val, [row["id"] for row in ins_val["images"]], 32, evaluation_used, cfg["seed"]+5, label="final COCO")
     for rows, split in ((train_caption,"train2014"),(dev_caption,"val2014"),(natural_train,"train2014"),(natural_dev,"val2014"),(natural_final,"val2014"),(annotation_train,"train2014"),(annotation_dev,"val2014"),(annotation_final,"val2014")):
         for row in rows: row["image_path"] = image_path(coco, split, row["image_id"]); row["split"] = split
-    write_json(out/"manifest.json", {"caption_train":train_caption,"caption_dev":dev_caption,"annotation_train":annotation_train,"annotation_dev":annotation_dev,"annotation_final":annotation_final,"natural_train":natural_train,"natural_dev":natural_dev,"natural_final":natural_final,"seed":cfg["seed"]})
-    print(f"Prepared Task 2 manifest at {out}; cache visual features next.")
+    manifest = {"caption_train":train_caption,"caption_dev":dev_caption,"annotation_train":annotation_train,"annotation_dev":annotation_dev,"annotation_final":annotation_final,"natural_train":natural_train,"natural_dev":natural_dev,"natural_final":natural_final,"seed":cfg["seed"]}
+    print("Writing deterministic manifest...", flush=True)
+    write_json(out/"manifest.json", manifest)
+    print(f"Prepared Task 2 manifest at {out}; cache visual features next.", flush=True)
 
 
 def cache_features(cfg, batch_size=32):

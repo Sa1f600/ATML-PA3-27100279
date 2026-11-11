@@ -2,6 +2,7 @@ import pytest
 from task2_vlm.metrics import bootstrap_pair_difference, exact_score, normalize_answer, vqa_soft_score
 from task2_vlm.model import Connector
 from task2_vlm.train import CurriculumSampler
+from task2_vlm.data import annotation_pairs, complementary_pairs, consensus
 
 def test_vqa_normalization_and_soft_consensus():
     assert normalize_answer('The, Two!') == '2'
@@ -33,3 +34,33 @@ def test_curriculum_sampler_restores_the_exact_next_examples():
     first.next_examples(8); saved=first.state_dict(); expected=first.next_examples(8)
     resumed=CurriculumSampler(manifest,'grounding',6304); resumed.load_state_dict(saved)
     assert resumed.next_examples(8)==expected
+
+
+def test_vqa_pairing_is_linear_and_uses_an_original_consensus_answer():
+    def annotation(question_id, image_id, answer):
+        return {"question_id": question_id, "image_id": image_id, "answer_type": "yes/no", "answers": [{"answer": answer}] * 8 + [{"answer": "noise"}] * 2}
+    questions = {"questions": [
+        {"question_id": 1, "image_id": 101, "question": "Is this red?"},
+        {"question_id": 2, "image_id": 102, "question": "Is this red?"},
+        {"question_id": 3, "image_id": 103, "question": "Is this red?"},
+        {"question_id": 4, "image_id": 104, "question": "Is this red?"},
+    ]}
+    annotations = {"annotations": [annotation(1, 101, "Yes"), annotation(2, 102, "No"), annotation(3, 103, "Yes"), annotation(4, 104, "No")]}
+    target, agreement, _ = consensus(annotations["annotations"][0])
+    assert target == "Yes" and agreement == 8
+    rows = complementary_pairs(questions, annotations, {"yesno": 2, "number": 0, "other": 0}, set(), 6304, label="test VQAv2")
+    assert len(rows) == 4
+    assert {row["image_id"] for row in rows} == {101, 102, 103, 104}
+
+
+def test_annotation_pair_builder_uses_indexes_and_keeps_eval_images_disjoint():
+    annotations = []
+    # Four distinct count buckets for category 1, plus enough images that do
+    # not contain it for a presence pair.
+    for image_id, count in enumerate((1, 2, 3, 4), start=1):
+        annotations.extend({"image_id": image_id, "category_id": 1} for _ in range(count))
+    instances = {"categories": [{"id": 1, "name": "cat"}], "annotations": annotations}
+    rows = annotation_pairs(instances, list(range(1, 9)), 1, set(), 6304, label="test COCO")
+    assert len(rows) == 4  # one presence pair and one counting pair
+    assert len({row["image_id"] for row in rows}) == 4
+    assert {row["kind"] for row in rows} == {"presence", "counting"}
