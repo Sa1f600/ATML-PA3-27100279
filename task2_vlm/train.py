@@ -134,11 +134,14 @@ def main():
     results=Path(cfg['results_dir']); results.mkdir(parents=True,exist_ok=True); started=time.perf_counter(); torch.cuda.reset_peak_memory_stats()
     if saved is None: write_json(results/'connector_calibration.json',calibrate_connector(connector,base,manifest,cfg))
     def log_development(tag):
+        print(f"Running development evaluation: {tag}...",flush=True)
         record={'tag':tag,'global_update':state['global_update'],**development_metrics(vlm,tokenizer,manifest,cfg)}
         with (results/'development.jsonl').open('a') as stream: stream.write(json.dumps(record)+'\n')
+        print(f"Saved development metrics: {tag}",flush=True)
     if saved is None: log_development('before_training')
     for stage_index in range(state['stage_index'],len(STAGES)):
         stage=STAGES[stage_index]; spec=cfg['stages'][stage]
+        print(f"Starting stage '{stage}' ({spec['updates']} updates).",flush=True)
         if stage!='caption' and not targets: targets=install_lora(base,cfg['lora_rank'],cfg['lora_alpha'],cfg['lora_dropout'])
         groups=[{'params':list(connector.parameters()),'lr':spec['connector_lr']}]
         if stage!='caption': groups.append({'params':[p for p in base.parameters() if p.requires_grad],'lr':spec['lora_lr']})
