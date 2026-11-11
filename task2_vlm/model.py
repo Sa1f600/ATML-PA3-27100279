@@ -53,7 +53,10 @@ class VLM(nn.Module):
     def forward(self, input_ids, attention_mask, position_ids, labels, visual_features=None, visual_positions=None):
         embeds = self.language_model.get_input_embeddings()(input_ids)
         if visual_features is None:
-            return self.language_model(inputs_embeds=embeds, attention_mask=attention_mask, position_ids=position_ids, labels=labels)
+            output=self.language_model(inputs_embeds=embeds, attention_mask=attention_mask, position_ids=position_ids)
+            token_loss=nn.functional.cross_entropy(output.logits[:,:-1].float().transpose(1,2),labels[:,1:],ignore_index=-100,reduction='none')
+            valid=(labels[:,1:] != -100); output.loss=(token_loss*valid).sum(1).div(valid.sum(1).clamp_min(1)).mean()
+            return output
         rows, masks, positions, labels_out = [], [], [], []
         visual = self.connector(visual_features).to(embeds.dtype)
         for i in range(len(embeds)):
@@ -64,4 +67,7 @@ class VLM(nn.Module):
             positions.append(torch.arange(rows[-1].shape[0], device=embeds.device))
         max_len = max(row.shape[0] for row in rows)
         def pad(items, value): return torch.stack([nn.functional.pad(x, (0, max_len - x.shape[0]), value=value) for x in items])
-        return self.language_model(inputs_embeds=pad(rows, 0), attention_mask=pad(masks, 0), position_ids=pad(positions, 0), labels=pad(labels_out, -100))
+        padded_labels=pad(labels_out,-100); output=self.language_model(inputs_embeds=pad(rows,0),attention_mask=pad(masks,0),position_ids=pad(positions,0))
+        token_loss=nn.functional.cross_entropy(output.logits[:,:-1].float().transpose(1,2),padded_labels[:,1:],ignore_index=-100,reduction='none')
+        valid=(padded_labels[:,1:] != -100); output.loss=(token_loss*valid).sum(1).div(valid.sum(1).clamp_min(1)).mean()
+        return output
