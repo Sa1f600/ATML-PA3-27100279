@@ -35,6 +35,39 @@ Evaluate a stage-end or final checkpoint with the four prescribed image conditio
 python -m task2_vlm.evaluate --checkpoint checkpoints/task2/vlm_196/update_4500 --split final
 ```
 
+## Task 3: test-time compute
+
+Task 3 is fully separate from Tasks 1 and 2. Its offline component reads the
+course-supplied `ATML-PA3-Data` rollout tables; it does not require any trained
+model or results from the earlier tasks. Put that unzipped bundle outside Git,
+then update the two source paths in `configs/task3/offline.json` if its folder
+names differ from the template.
+
+```bash
+python -m task3_test_time.offline --config configs/task3/offline.json
+python -m task3_test_time.analyze --offline results/task3/offline
+```
+
+The offline run writes the seed-6304 development/held-out split IDs and all ten
+nested rollout orders before scoring. It saves per-question selection records,
+adaptive-policy choices, paired bootstrap intervals, signal summaries, and plot
+inputs for both exports. Selection and stopping never read gold answers.
+
+The 50-question MATH live experiment is separate and resumable. First run the
+offline analysis; then point `--manifest` to its MATH split manifest and point
+`--questions` to the course bundle's matching sample-id/question table:
+
+```bash
+python -m task3_test_time.live \
+  --manifest results/task3/offline/math/MATH_split_and_orders.json \
+  --questions data/ATML-PA3-Data/math_questions.parquet \
+  --output results/task3/live_math
+```
+
+Each completed question is synchronously appended to `records.jsonl`; rerun the
+same command after a timeout and it skips those questions. This makes the only
+new-generation part safe to run in a temporary notebook session.
+
 ## Environment
 
 Use Python 3.10-3.12 on a machine with an NVIDIA CUDA GPU. Install an appropriate

@@ -1,0 +1,23 @@
+{
+  "seed": 6304,
+  "orders": 10,
+  "input_root": "data/ATML-PA3-Data",
+  "output_dir": "results/task3/offline",
+  "sources": [
+    {
+      "name": "math",
+      "dataset": "MATH",
+      "multiple_choice": false,
+      "generations": "qwen2.5-3b-instruct/generations.parquet",
+      "probability_metrics": "qwen2.5-3b-instruct/probability_metrics.parquet"
+    },
+    {
+      "name": "mathvista",
+      "dataset": "MathVista",
+      "multiple_choice": true,
+      "generations": "qwen2.5-vl-3b-instruct/generations.parquet",
+      "probability_metrics": "qwen2.5-vl-3b-instruct/probability_metrics.parquet",
+      "attention_metrics": "qwen2.5-vl-3b-instruct/attention_metrics.parquet"
+    }
+  ]
+}
