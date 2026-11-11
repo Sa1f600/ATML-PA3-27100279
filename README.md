@@ -16,6 +16,7 @@ annotation JSON files into the paths in `configs/task2/vlm_196.json`, then run:
 python -m task2_vlm.prepare
 python -m task2_vlm.prepare --features-only --cache-features
 python -m task2_vlm.preflight --require-features
+python -m task2_vlm.smoke --output results/task2/smoke_test.json
 python -m task2_vlm.train
 ```
 
@@ -24,6 +25,10 @@ VQAv2, and annotation-derived pair sizes and stores image/question/pair IDs.
 Feature caching freezes SigLIP after writing FP16 `[196, 768]` features, so Qwen
 training never keeps the encoder on GPU. Training writes recovery checkpoints
 every 250 main-run updates; resume with `--resume checkpoints/task2/vlm_196/update_XXXX`.
+Run the isolated GPU smoke test after preflight and before the full curriculum:
+it performs one real connector-only caption update and one real connector-plus-LoRA
+grounding update, writing only the requested standalone JSON result (never a
+training checkpoint).
 Evaluate a stage-end or final checkpoint with the four prescribed image conditions:
 
 ```bash
