@@ -7,7 +7,7 @@ import torch
 
 from common.experiment import read_json
 from task1_finetuning.evaluate import (
-    TASKS, completed_task_from_disk, enrich_samples, generation_metadata,
+    TASKS, completed_task_from_disk, enrich_samples, evaluate_gsm8k_in_chunks, generation_metadata,
     primary_score, recording_hflm_class, stable_json,
 )
 from task1_finetuning.inference import CONDITIONS, compare_logits, merge_adapter_into
@@ -112,6 +112,23 @@ def test_completed_benchmark_can_be_reused_only_when_all_samples_are_saved(tmp_p
     assert completed_task_from_disk(tmp_path, name) == {"metrics": metrics, "examples": TASKS[name][2]}
     samples_path.write_text('{"doc_id": 0}\n')
     assert completed_task_from_disk(tmp_path, name) is None
+
+
+def test_gsm8k_chunk_checkpoint_is_reused_after_interruption(tmp_path, monkeypatch):
+    monkeypatch.setitem(TASKS, "gsm8k_cot", ("unused", "test", 2, "exact_match,flexible-extract"))
+    class Split:
+        def select(self, indices): return self
+    class Task: dataset = {"test": Split()}
+    class LM: generation_records = {"p": {"truncated": False}}
+    calls = []
+    def evaluate(**kwargs):
+        calls.append(1)
+        return {"results": {"gsm8k_cot": {"exact_match,flexible-extract": .5}},
+                "samples": {"gsm8k_cot": [{"arguments": [("p", {})], "filtered_resps": ["1"], "doc_id": 0}]}}
+    cfg = {"gsm8k_max_new_tokens": 4}
+    evaluate_gsm8k_in_chunks(LM(), Task(), cfg, tmp_path, evaluate, 2)
+    evaluate_gsm8k_in_chunks(LM(), Task(), cfg, tmp_path, evaluate, 2)
+    assert len(calls) == 1
 
 
 def test_actual_stock_filters_and_prompt_definitions():

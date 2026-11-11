@@ -218,12 +218,50 @@ def completed_task_from_disk(destination, name):
     return {"metrics": metrics, "examples": len(samples)}
 
 
+def read_jsonl(path):
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+
+def evaluate_gsm8k_in_chunks(lm, task, cfg, destination, simple_evaluate, chunk_size):
+    """Checkpoint GSM8K in contiguous document chunks so interruption is recoverable."""
+    name, split, total, metric_key = "gsm8k_cot", TASKS["gsm8k_cot"][1], TASKS["gsm8k_cot"][2], TASKS["gsm8k_cot"][3]
+    source = task.dataset[split]
+    root = destination / "gsm8k_chunks"; root.mkdir(parents=True, exist_ok=True)
+    all_samples, weighted, evaluated = [], 0.0, 0
+    try:
+        for start in range(0, total, chunk_size):
+            end = min(start + chunk_size, total); chunk = root / f"{start:04d}_{end:04d}"
+            result_path, samples_path = chunk / "results.json", chunk / "samples.jsonl"
+            if result_path.exists() and samples_path.exists():
+                result, samples = read_json(result_path), read_jsonl(samples_path)
+                print(f"Reusing GSM8K chunk {start}:{end}", flush=True)
+            else:
+                chunk.mkdir(parents=True, exist_ok=True)
+                task.dataset[split] = source.select(range(start, end))
+                result = simple_evaluate(model=lm, tasks=[task], num_fewshot=0, limit=None, log_samples=True,
+                    apply_chat_template=True, gen_kwargs={"do_sample": False, "max_gen_toks": cfg["gsm8k_max_new_tokens"]},
+                    random_seed=6304, numpy_random_seed=6304, torch_random_seed=6304,
+                    fewshot_random_seed=6304, bootstrap_iters=0)
+                samples = enrich_samples(name, result.pop("samples")[name], lm.generation_records)
+                write_json(result_path, json.loads(stable_json(result)))
+                with samples_path.open("w") as stream:
+                    for row in samples: stream.write(stable_json(row) + "\n")
+                print(f"Saved GSM8K chunk {start}:{end}", flush=True)
+            count = end - start
+            weighted += primary_score(name, result["results"][name]) * count; evaluated += count; all_samples.extend(samples)
+    finally:
+        task.dataset[split] = source
+    return {"results": {name: {metric_key: weighted / evaluated}}, "chunked": True}, all_samples
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=EVAL_CONFIG)
     parser.add_argument("--condition", choices=["all", *CONDITIONS], default="all")
     parser.add_argument("--smoke-test", action="store_true",
                         help="Run two GSM8K examples and save only under evaluation/smoke/.")
+    parser.add_argument("--gsm8k-chunk-size", type=int, default=32,
+                        help="Durable GSM8K recovery chunk size; ignored by --smoke-test.")
     args = parser.parse_args()
     cfg = read_json(args.config)
     if not torch.cuda.is_available():
@@ -266,15 +304,18 @@ def main():
             else:
                 print(f"Starting benchmark: {condition}/{name}", flush=True)
                 lm.set_progress_label(f"{condition}/{name}")
-                results = simple_evaluate(
-                    model=lm, tasks=[task], num_fewshot=0, limit=2 if args.smoke_test else None, log_samples=True,
-                    apply_chat_template=name == "gsm8k_cot",
-                    gen_kwargs={"do_sample": False, "max_gen_toks": cfg["gsm8k_max_new_tokens"]}
-                               if name == "gsm8k_cot" else None,
-                    random_seed=6304, numpy_random_seed=6304, torch_random_seed=6304,
-                    fewshot_random_seed=6304, bootstrap_iters=0,
-                )
-                samples = enrich_samples(name, results.pop("samples")[name], lm.generation_records)
+                if name == "gsm8k_cot" and not args.smoke_test:
+                    results, samples = evaluate_gsm8k_in_chunks(lm, task, cfg, destination, simple_evaluate, args.gsm8k_chunk_size)
+                else:
+                    results = simple_evaluate(
+                        model=lm, tasks=[task], num_fewshot=0, limit=2 if args.smoke_test else None, log_samples=True,
+                        apply_chat_template=name == "gsm8k_cot",
+                        gen_kwargs={"do_sample": False, "max_gen_toks": cfg["gsm8k_max_new_tokens"]}
+                                   if name == "gsm8k_cot" else None,
+                        random_seed=6304, numpy_random_seed=6304, torch_random_seed=6304,
+                        fewshot_random_seed=6304, bootstrap_iters=0,
+                    )
+                    samples = enrich_samples(name, results.pop("samples")[name], lm.generation_records)
                 # The harness has already iterated its complete pinned split.
                 # Some released task/filter versions expose a different number
                 # of log-sample rows than generation requests.  Preserve those
