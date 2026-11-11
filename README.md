@@ -5,6 +5,31 @@ diagnostics/plots, and qualitative generation plus human-annotation tooling.
 No full training or benchmark experiment has been run; no measured benchmark
 scores or qualitative labels are supplied.
 
+## Task 2: Colab setup
+
+Task 2 uses the original Qwen3-0.6B, a frozen `google/siglip-base-patch16-224`
+encoder, a FP32 768-to-1024 GELU connector, and rank-16 attention LoRA enabled
+only in stages 2-3. Download COCO 2014 images/annotations and VQAv2 question and
+annotation JSON files into the paths in `configs/task2/vlm_196.json`, then run:
+
+```bash
+python -m task2_vlm.prepare
+python -m task2_vlm.prepare --features-only --cache-features
+python -m task2_vlm.preflight --require-features
+python -m task2_vlm.train
+```
+
+The manifest builder deterministically selects the specified caption, natural
+VQAv2, and annotation-derived pair sizes and stores image/question/pair IDs.
+Feature caching freezes SigLIP after writing FP16 `[196, 768]` features, so Qwen
+training never keeps the encoder on GPU. Training writes recovery checkpoints
+every 250 main-run updates; resume with `--resume checkpoints/task2/vlm_196/update_XXXX`.
+Evaluate a stage-end or final checkpoint with the four prescribed image conditions:
+
+```bash
+python -m task2_vlm.evaluate --checkpoint checkpoints/task2/vlm_196/update_4500 --split final
+```
+
 ## Environment
 
 Use Python 3.10-3.12 on a machine with an NVIDIA CUDA GPU. Install an appropriate

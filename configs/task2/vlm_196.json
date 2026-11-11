@@ -1,0 +1,29 @@
+{
+  "seed": 6304,
+  "model_id": "Qwen/Qwen3-0.6B",
+  "vision_model_id": "google/siglip-base-patch16-224",
+  "visual_tokens": 196,
+  "feature_dim": 768,
+  "hidden_dim": 1024,
+  "prepared_dir": "cached/task2/prepared",
+  "feature_dir": "cached/task2/features_196",
+  "checkpoint_dir": "checkpoints/task2/vlm_196",
+  "results_dir": "results/task2/vlm_196",
+  "coco_root": "data/coco2014",
+  "vqa_root": "data/vqav2",
+  "max_question_tokens": 80,
+  "max_caption_tokens": 64,
+  "max_answer_tokens": 16,
+  "microbatch_size": 8,
+  "gradient_accumulation": 2,
+  "weight_decay": 0.01,
+  "gradient_clip_norm": 1.0,
+  "lora_rank": 16,
+  "lora_alpha": 32,
+  "lora_dropout": 0.05,
+  "stages": {
+    "caption": {"updates": 2250, "connector_lr": 0.001, "lora_lr": 0.0},
+    "grounding": {"updates": 1500, "connector_lr": 0.0001, "lora_lr": 0.00002},
+    "natural": {"updates": 750, "connector_lr": 0.00005, "lora_lr": 0.00001}
+  }
+}
