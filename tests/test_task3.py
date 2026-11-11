@@ -1,4 +1,6 @@
-from task3_test_time.core import Candidate, adaptive_stop, attach_visconf, choose, rank_weights
+from task3_test_time.core import Candidate, adaptive_stop, attach_visconf, choose, group_answers, rank_weights
+from task3_test_time.offline import load_source
+import pandas as pd
 
 
 def candidates():
@@ -25,11 +27,39 @@ def test_average_rank_ties():
 
 
 def test_visconf_is_prefix_local_and_bounded():
-    scored = attach_visconf(candidates(), [[0.0], [1.0], [2.0], [3.0]])
+    items = [Candidate(**{**item.__dict__, "token_kls": (float(index),), "token_vision": (.5,)})
+             for index, item in enumerate(candidates())]
+    scored = attach_visconf(items)
     assert all(0.0 <= item.visconf <= 1.0 for item in scored)
+    assert all(0.0 <= item.tokenwise_visconf <= 1.0 for item in scored)
 
 
 def test_adaptive_requires_non_missing_unique_leader():
     items = [Candidate(str(i), "yes", 1, 0, 1) for i in range(4)]
-    consumed, answer = adaptive_stop(items, tau=0.75, gamma=None, score_name=None)
-    assert (consumed, answer) == (4, "yes")
+    consumed, answer, reason = adaptive_stop(items, tau=0.75, gamma=None, score_name=None)
+    assert (consumed, answer, reason) == (4, "yes", "agreement")
+
+
+def test_missing_answers_share_one_group_without_gold():
+    assert group_answers([None, "", "2/4", "1/2"], dataset="MATH") == ["__NO_ANSWER__", "__NO_ANSWER__", "num:1/2", "num:1/2"]
+
+
+def test_loader_preserves_and_validates_token_level_vlm_arrays(tmp_path):
+    rows = [{"sample_id": f"q{i:04d}", "rollout_id": f"r{rollout}", "extracted_answer": "A", "gold_answer": "A",
+             "generated_token_ids": [1, 2]} for i in range(1000) for rollout in range(32)]
+    generations = pd.DataFrame(rows)
+    probability = generations[["sample_id", "rollout_id"]].copy()
+    probability["logp"], probability["kl_u_p"] = [[-.1, -.2]] * len(probability), [[.2, .4]] * len(probability)
+    attention = generations[["sample_id", "rollout_id"]].copy()
+    attention["image_attention"], attention["prompt_attention"], attention["generated_attention"] = [[1., 1.]] * len(attention), [[1., 1.]] * len(attention), [[2., 2.]] * len(attention)
+    metadata = pd.DataFrame({"sample_id": [f"q{i:04d}" for i in range(1000)], "answer_type": "multiple choice", "precision": 0})
+    generations.to_parquet(tmp_path / "g.parquet")
+    probability.to_parquet(tmp_path / "p.parquet")
+    attention.to_parquet(tmp_path / "a.parquet")
+    metadata.to_parquet(tmp_path / "m.parquet")
+    loaded, details = load_source({"name": "toy", "dataset": "MathVista", "generations": "g.parquet", "probability_metrics": "p.parquet",
+                                   "attention_metrics": "a.parquet", "question_metadata": "m.parquet"}, tmp_path)
+    assert details["token_alignment"] == "passed"
+    assert len(loaded) == 32000
+    assert loaded.iloc[0].token_kls == [.2, .4]
+    assert loaded.iloc[0].token_vision == [.25, .25]

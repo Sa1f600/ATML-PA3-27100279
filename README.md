@@ -41,7 +41,10 @@ Task 3 is fully separate from Tasks 1 and 2. Its offline component reads the
 course-supplied `ATML-PA3-Data` rollout tables; it does not require any trained
 model or results from the earlier tasks. Put that unzipped bundle outside Git,
 then update the two source paths in `configs/task3/offline.json` if its folder
-names differ from the template.
+names differ from the template. For MathVista, also set `question_metadata` to
+the released metadata table: this is required to apply its answer type, option,
+and precision rules. The first run also installs `math-verify`, required for
+MATH answer equivalence.
 
 ```bash
 python -m task3_test_time.offline --config configs/task3/offline.json
@@ -61,6 +64,7 @@ offline analysis; then point `--manifest` to its MATH split manifest and point
 python -m task3_test_time.live \
   --manifest results/task3/offline/math/MATH_split_and_orders.json \
   --questions data/ATML-PA3-Data/math_questions.parquet \
+  --revision <course-README-Qwen-revision> \
   --output results/task3/live_math
 ```
 

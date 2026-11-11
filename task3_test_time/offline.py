@@ -1,42 +1,43 @@
-"""Offline Task 3 analysis for the supplied 32-rollout exports.
+"""Offline Task 3 analysis of the supplied 32-rollout exports.
 
-Usage:
-  python -m task3_test_time.offline --config configs/task3/offline.json
-
-The input layout is configurable because the course data bundle is intentionally
-not committed to Git.  Outputs are atomic JSON/CSV files and can be rerun safely.
+The loader retains generated-token arrays rather than averaging them on read. It
+therefore verifies token alignment and recomputes VisConf from each revealed
+prefix exactly as required by the assignment.
 """
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 
-from .core import Candidate, NO_ANSWER, adaptive_stop, attach_visconf, choose, is_correct, normalise_answer
+from .core import (Candidate, SCORER_VERSION, adaptive_stop, attach_visconf,
+                   choose, group_answers, answer_equivalent)
 
 
-KEY_ALIASES = {
+ALIASES = {
     "sample_id": ("sample_id", "question_id", "id"),
     "rollout_id": ("rollout_id", "rollout", "candidate_id"),
+    "dataset": ("dataset",),
     "answer": ("extracted_answer", "answer", "final_answer", "prediction"),
     "gold": ("gold_answer", "reference_answer", "target", "answer_gold"),
-    "text": ("text", "generation", "response", "output"),
     "length": ("generated_token_count", "token_count", "length", "generated_tokens"),
+    "token_ids": ("generated_token_ids", "output_token_ids", "token_ids"),
     "logp": ("logp", "token_logp", "sampled_token_logp"),
     "kl": ("kl_u_p", "token_kl_u_p", "kl"),
     "image": ("image_attention", "attention_image", "image"),
     "prompt": ("prompt_attention", "attention_prompt", "prompt"),
     "generated": ("generated_attention", "attention_generated", "generated"),
+    "answer_type": ("answer_type", "question_type", "type"),
+    "precision": ("precision", "answer_precision", "decimal_places"),
 }
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    with path.open() as handle:
-        return json.load(handle)
+    return json.loads(path.read_text())
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -46,279 +47,332 @@ def write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
-def find_column(frame: pd.DataFrame, key: str, required: bool = True) -> str | None:
-    for column in KEY_ALIASES[key]:
-        if column in frame.columns:
-            return column
-    if required:
-        raise ValueError(f"No {key!r} column. Expected one of {KEY_ALIASES[key]}; found {list(frame.columns)}")
-    return None
+def column(frame: pd.DataFrame, name: str, required: bool = True) -> str | None:
+    result = next((candidate for candidate in ALIASES[name] if candidate in frame.columns), None)
+    if result is None and required:
+        raise ValueError(f"Missing {name!r}; expected one of {ALIASES[name]}, found {list(frame.columns)}")
+    return result
 
 
-def mean_value(value: Any) -> float:
+def flatten_numbers(value: Any) -> list[float]:
     if isinstance(value, np.ndarray):
         value = value.tolist()
     if isinstance(value, (list, tuple)):
-        numbers = [mean_value(part) for part in value]
-        return float(np.mean(numbers)) if numbers else 0.0
+        return [number for part in value for number in flatten_numbers(part)]
     try:
         number = float(value)
-        return number if np.isfinite(number) else 0.0
+        return [number] if np.isfinite(number) else [0.0]
     except (TypeError, ValueError):
-        return 0.0
+        return []
 
 
-def aggregate_metrics(frame: pd.DataFrame, key_columns: list[str], source_column: str, output_column: str) -> pd.DataFrame:
-    copied = frame[key_columns + [source_column]].copy()
-    copied[output_column] = copied[source_column].map(mean_value)
-    return copied.groupby(key_columns, as_index=False)[output_column].mean()
+def sequence_table(frame: pd.DataFrame, keys: list[str], sequence_column: str, output_column: str) -> pd.DataFrame:
+    table = frame[keys + [sequence_column]].copy()
+    table[output_column] = table[sequence_column].map(flatten_numbers)
+    return table.groupby(keys, as_index=False)[output_column].agg(lambda values: [item for value in values for item in value])
+
+
+def _path(root: Path, value: str) -> Path:
+    candidate = Path(value).expanduser()
+    return candidate if candidate.is_absolute() else root / candidate
+
+
+def metadata_for_source(spec: dict[str, Any], root: Path, rows: pd.DataFrame) -> pd.DataFrame:
+    metadata_path = spec.get("question_metadata")
+    rows["multiple_choice"] = bool(spec.get("multiple_choice", False))
+    rows["precision"] = None
+    if not metadata_path:
+        return rows
+    path = _path(root, metadata_path)
+    metadata = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_json(path)
+    source_id = column(metadata, "sample_id")
+    answer_type, precision = column(metadata, "answer_type", required=False), column(metadata, "precision", required=False)
+    selected = pd.DataFrame({"sample_id": metadata[source_id].astype(str)})
+    selected["multiple_choice"] = (metadata[answer_type].astype(str).str.lower().str.contains("multi|choice|option")
+                                   if answer_type else bool(spec.get("multiple_choice", False)))
+    selected["precision"] = pd.to_numeric(metadata[precision], errors="coerce") if precision else np.nan
+    rows = rows.drop(columns=["multiple_choice", "precision"]).merge(selected, on="sample_id", how="left", validate="many_to_one")
+    rows["multiple_choice"] = rows["multiple_choice"].fillna(bool(spec.get("multiple_choice", False))).astype(bool)
+    return rows
 
 
 def load_source(spec: dict[str, Any], root: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Load one LLM/VLM export and return normalized rollout rows."""
-    resolve = lambda item: (root / item).resolve() if not Path(item).is_absolute() else Path(item)
-    generations_path = resolve(spec["generations"])
-    probability_path = resolve(spec["probability_metrics"])
-    generations, probability = pd.read_parquet(generations_path), pd.read_parquet(probability_path)
-    sample = find_column(generations, "sample_id")
-    rollout = find_column(generations, "rollout_id")
-    answer = find_column(generations, "answer")
-    gold = find_column(generations, "gold")
-    length = find_column(generations, "length", required=False)
-    key_columns = [sample, rollout]
-    psample, prollout = find_column(probability, "sample_id"), find_column(probability, "rollout_id")
-    logp, kl = find_column(probability, "logp"), find_column(probability, "kl")
-    probability = probability.rename(columns={psample: sample, prollout: rollout})
-    metrics = aggregate_metrics(probability, key_columns, logp, "mean_logp").merge(
-        aggregate_metrics(probability, key_columns, kl, "self_certainty"), on=key_columns, how="outer"
+    if spec["dataset"].lower() == "math":
+        try:
+            import math_verify  # noqa: F401
+        except ImportError as error:
+            raise RuntimeError("MATH scoring requires math-verify. Run `pip install math-verify` before Task 3.") from error
+    if spec["dataset"].lower() == "mathvista" and not spec.get("question_metadata"):
+        raise ValueError("MathVista scoring requires its released question metadata for answer type/choice/precision rules.")
+    generations = pd.read_parquet(_path(root, spec["generations"]))
+    probability = pd.read_parquet(_path(root, spec["probability_metrics"]))
+    sample, rollout = column(generations, "sample_id"), column(generations, "rollout_id")
+    answer, gold = column(generations, "answer"), column(generations, "gold")
+    generated_length, generated_ids = column(generations, "length", False), column(generations, "token_ids", False)
+    keys = [sample, rollout]
+    if column(generations, "dataset", False) and column(probability, "dataset", False):
+        keys.insert(0, column(generations, "dataset"))
+    p_sample, p_rollout = column(probability, "sample_id"), column(probability, "rollout_id")
+    renames = {p_sample: sample, p_rollout: rollout}
+    if len(keys) == 3:
+        renames[column(probability, "dataset")] = keys[0]
+    probability = probability.rename(columns=renames)
+    logp, kl = column(probability, "logp"), column(probability, "kl")
+    metrics = sequence_table(probability, keys, logp, "token_logp").merge(
+        sequence_table(probability, keys, kl, "token_kls"), on=keys, validate="one_to_one"
     )
-    output = generations.merge(metrics, on=key_columns, how="left", validate="one_to_one")
-    output = output.rename(columns={sample: "sample_id", rollout: "rollout_id", answer: "extracted_answer", gold: "gold"})
-    output["token_count"] = output[length].map(mean_value).round().astype(int) if length else 0
-    if not length or (output["token_count"] <= 0).all():
-        text_column = find_column(generations, "text", required=False)
-        output["token_count"] = output[text_column].fillna("").map(lambda text: max(1, len(str(text).split()))) if text_column else 0
-    output["mean_logp"] = output["mean_logp"].fillna(0.0)
-    output["self_certainty"] = output["self_certainty"].fillna(0.0)
-    output["vision"] = 0.0
+    rows = generations.merge(metrics, on=keys, how="left", validate="one_to_one")
+    rows = rows.rename(columns={sample: "sample_id", rollout: "rollout_id", answer: "raw_answer", gold: "gold"})
+    rows["sample_id"], rows["rollout_id"] = rows.sample_id.astype(str), rows.rollout_id.astype(str)
+    rows["token_logp"] = rows.token_logp.map(lambda value: value if isinstance(value, list) else [])
+    rows["token_kls"] = rows.token_kls.map(lambda value: value if isinstance(value, list) else [])
+    rows["token_count"] = rows.token_logp.map(len)
+    if generated_length:
+        expected = pd.to_numeric(rows[generated_length], errors="coerce").fillna(0).astype(int)
+    elif generated_ids:
+        expected = rows[generated_ids].map(lambda value: len(value) if isinstance(value, (list, tuple, np.ndarray)) else 0)
+    else:
+        raise ValueError("The generation table needs generated-token IDs or an explicit generated-token length for alignment checks.")
+    misaligned = rows[(rows.token_count != expected) | (rows.token_kls.map(len) != expected)]
+    if not misaligned.empty:
+        examples = misaligned[["sample_id", "rollout_id", "token_count"]].head(5).to_dict("records")
+        raise ValueError(f"Token-list alignment failed for logp/KL/generated tokens; examples: {examples}")
+    if generated_ids and generated_length:
+        id_lengths = rows[generated_ids].map(lambda value: len(value) if isinstance(value, (list, tuple, np.ndarray)) else 0)
+        # The course metrics exclude a terminal token; a generation token-ID list
+        # may retain that one extra EOS token and is accepted only in that case.
+        malformed = ~id_lengths.isin(expected) & ~id_lengths.isin(expected + 1)
+        if malformed.any():
+            raise ValueError("Generated token IDs do not agree with the supplied generated-token length.")
+    rows["mean_logp"] = rows.token_logp.map(lambda values: float(np.mean(values)) if values else 0.0)
+    rows["self_certainty"] = rows.token_kls.map(lambda values: float(np.mean(values)) if values else 0.0)
+    rows["token_vision"] = rows.token_kls.map(lambda values: [0.0] * len(values))
     attention_path = spec.get("attention_metrics")
     if attention_path:
-        attention = pd.read_parquet(resolve(attention_path))
-        asample, arollout = find_column(attention, "sample_id"), find_column(attention, "rollout_id")
-        image, prompt, generated = (find_column(attention, name) for name in ("image", "prompt", "generated"))
-        attention = attention.rename(columns={asample: "sample_id", arollout: "rollout_id"})
-        image_values, prompt_values, generated_values = (attention[column].map(mean_value) for column in (image, prompt, generated))
-        attention["vision"] = image_values / (image_values + prompt_values + generated_values).clip(lower=1e-8)
-        attention = attention.groupby(["sample_id", "rollout_id"], as_index=False)["vision"].mean()
-        output = output.drop(columns=["vision"]).merge(attention, on=["sample_id", "rollout_id"], how="left")
-        output["vision"] = output["vision"].fillna(0.0)
-    output["dataset"] = spec["dataset"]
-    output["multiple_choice"] = bool(spec.get("multiple_choice", False))
-    output["answer_group"] = [normalise_answer(a, multiple_choice=mc) for a, mc in zip(output.extracted_answer, output.multiple_choice)]
-    if output.duplicated(["sample_id", "rollout_id"]).any():
-        raise ValueError(f"Duplicate (sample_id, rollout_id) in {generations_path}")
-    counts = output.groupby("sample_id").rollout_id.nunique()
-    if not (counts == 32).all():
-        bad = counts[counts != 32].head().to_dict()
-        raise ValueError(f"Every question must have 32 rollouts; examples: {bad}")
-    return output, {"name": spec["name"], "rows": len(output), "questions": int(counts.size)}
+        attention = pd.read_parquet(_path(root, attention_path))
+        a_sample, a_rollout = column(attention, "sample_id"), column(attention, "rollout_id")
+        attention = attention.rename(columns={a_sample: "sample_id", a_rollout: "rollout_id"})
+        a_keys = ["sample_id", "rollout_id"]
+        image, prompt, generated = (column(attention, name) for name in ("image", "prompt", "generated"))
+        image_values = sequence_table(attention, a_keys, image, "image_tokens")
+        prompt_values = sequence_table(attention, a_keys, prompt, "prompt_tokens")
+        generated_values = sequence_table(attention, a_keys, generated, "generated_tokens")
+        attention = image_values.merge(prompt_values, on=a_keys, validate="one_to_one").merge(generated_values, on=a_keys, validate="one_to_one")
+        def vision(row: pd.Series) -> list[float]:
+            parts = [row.image_tokens, row.prompt_tokens, row.generated_tokens]
+            if len({len(part) for part in parts}) != 1:
+                raise ValueError(f"Attention-group token alignment failed for {row.sample_id}/{row.rollout_id}")
+            return [image_value / max(image_value + prompt_value + generated_value, 1e-8)
+                    for image_value, prompt_value, generated_value in zip(*parts)]
+        attention["token_vision"] = attention.apply(vision, axis=1)
+        rows = rows.drop(columns="token_vision").merge(attention[a_keys + ["token_vision"]], on=a_keys, how="left", validate="one_to_one")
+        missing = rows.token_vision.isna()
+        if missing.any():
+            raise ValueError(f"Missing VLM attention records for {int(missing.sum())} rollouts.")
+        bad = rows[rows.apply(lambda row: len(row.token_vision) != row.token_count, axis=1)]
+        if not bad.empty:
+            raise ValueError("Attention-token length does not match generated-token length.")
+    rows["dataset"] = spec["dataset"]
+    rows = metadata_for_source(spec, root, rows)
+    groups, correctness = [], []
+    for _, question in rows.groupby("sample_id", sort=False):
+        precision = question.precision.iloc[0]
+        precision = int(precision) if pd.notna(precision) else None
+        multiple_choice = bool(question.multiple_choice.iloc[0])
+        question_groups = group_answers(question.raw_answer, dataset=spec["dataset"], multiple_choice=multiple_choice, precision=precision)
+        groups.extend(question_groups)
+        correctness.extend(answer_equivalent(answer, question.gold.iloc[0], dataset=spec["dataset"], multiple_choice=multiple_choice, precision=precision)
+                           for answer in question.raw_answer)
+    rows["answer_group"], rows["correct"] = groups, correctness
+    counts = rows.groupby("sample_id").rollout_id.nunique()
+    if len(counts) != 1000 or not (counts == 32).all():
+        raise ValueError(f"Expected 1,000 questions x 32 rollouts; got {len(counts)} questions and irregular examples {counts[counts != 32].head().to_dict()}")
+    return rows, {"name": spec["name"], "questions": len(counts), "rows": len(rows), "token_alignment": "passed"}
 
 
-def build_manifest(rows: pd.DataFrame, output_dir: Path, seed: int, orders: int) -> dict[str, Any]:
-    question_ids = sorted(rows.sample_id.astype(str).unique())
-    if len(question_ids) != 1000:
-        raise ValueError(f"Expected exactly 1,000 questions for {rows.dataset.iloc[0]}, found {len(question_ids)}")
+def build_manifest(rows: pd.DataFrame, output: Path, seed: int, orders: int) -> dict[str, Any]:
+    ids = sorted(rows.sample_id.unique())
     rng = np.random.default_rng(seed)
-    shuffled = list(rng.permutation(question_ids))
-    dev, test = shuffled[:200], shuffled[200:]
-    orders_map: dict[str, list[list[str]]] = {}
-    for sample_id, group in rows.groupby(rows.sample_id.astype(str), sort=False):
-        rollout_ids = sorted(group.rollout_id.astype(str).tolist())
-        local_rng = np.random.default_rng(seed + sum(ord(character) for character in sample_id))
-        orders_map[sample_id] = [list(local_rng.permutation(rollout_ids)) for _ in range(orders)]
-    manifest = {"seed": seed, "dev_ids": dev, "test_ids": test, "orders": orders_map}
-    write_json(output_dir / f"{rows.dataset.iloc[0]}_split_and_orders.json", manifest)
+    shuffled = list(rng.permutation(ids))
+    orders_by_question: dict[str, list[list[str]]] = {}
+    for offset, (sample_id, question) in enumerate(rows.groupby("sample_id", sort=True)):
+        local = np.random.default_rng(seed + offset)
+        rollout_ids = sorted(question.rollout_id.tolist())
+        orders_by_question[str(sample_id)] = [list(local.permutation(rollout_ids)) for _ in range(orders)]
+    manifest = {"seed": seed, "dev_ids": shuffled[:200], "test_ids": shuffled[200:], "orders": orders_by_question}
+    write_json(output / f"{rows.dataset.iloc[0]}_split_and_orders.json", manifest)
     return manifest
 
 
-def candidates_for_order(group: pd.DataFrame, order: list[str]) -> list[Candidate]:
-    indexed = group.set_index(group.rollout_id.astype(str))
-    candidates = [
-        Candidate(
-            rollout_id=rollout_id,
-            answer=str(indexed.loc[rollout_id, "answer_group"]),
-            token_count=int(indexed.loc[rollout_id, "token_count"]),
-            mean_logp=float(indexed.loc[rollout_id, "mean_logp"]),
-            self_certainty=float(indexed.loc[rollout_id, "self_certainty"]),
-            vision=float(indexed.loc[rollout_id, "vision"]),
-        )
-        for rollout_id in order
-    ]
-    return attach_visconf(candidates)
+def candidates(question: pd.DataFrame, order: list[str]) -> list[Candidate]:
+    by_id = question.set_index("rollout_id")
+    raw = [Candidate(rollout_id=item, answer=by_id.at[item, "answer_group"], token_count=int(by_id.at[item, "token_count"]),
+                     mean_logp=float(by_id.at[item, "mean_logp"]), self_certainty=float(by_id.at[item, "self_certainty"]),
+                     token_kls=tuple(by_id.at[item, "token_kls"]), token_vision=tuple(by_id.at[item, "token_vision"]),
+                     correct=bool(by_id.at[item, "correct"])) for item in order]
+    return attach_visconf(raw)
 
 
-def method_specs(is_vlm: bool) -> list[tuple[str, str, str | None]]:
-    specs = [
-        ("firstans", "first", None),
-        ("self_consistency", "self_consistency", None),
-        ("mean_logp", "highest_score", "mean_logp"),
-        ("self_certainty", "highest_score", "self_certainty"),
-        ("self_certainty_rwc", "rwc", "self_certainty"),
-    ]
-    if is_vlm:
-        specs.extend([
-            ("vision_only", "highest_score", "vision"),
-            ("vision_only_rwc", "rwc", "vision"),
-            ("visconf", "highest_score", "visconf"),
-            ("visconf_rwc", "rwc", "visconf"),
-        ])
-    return specs
+def methods(vlm: bool) -> list[tuple[str, str, str | None]]:
+    out = [("firstans", "first", None), ("self_consistency", "self_consistency", None),
+           ("mean_logp", "highest_score", "mean_logp"), ("self_certainty", "highest_score", "self_certainty"),
+           ("self_certainty_rwc", "rwc", "self_certainty")]
+    if vlm:
+        out += [("vision_only", "highest_score", "vision"), ("vision_only_rwc", "rwc", "vision"),
+                ("visconf", "highest_score", "visconf"), ("visconf_rwc", "rwc", "visconf"),
+                ("visconf_token", "highest_score", "visconf_token"), ("visconf_token_rwc", "rwc", "visconf_token")]
+    return out
 
 
-def evaluate_fixed(rows: pd.DataFrame, manifest: dict[str, Any], is_vlm: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
-    records: list[dict[str, Any]] = []
-    signal_records: list[dict[str, Any]] = []
-    for sample_id, group in rows.groupby(rows.sample_id.astype(str), sort=False):
-        gold, multiple_choice = group.gold.iloc[0], bool(group.multiple_choice.iloc[0])
+def selection_correct(prefix: list[Candidate], answer: str) -> bool:
+    return any(item.answer == answer and item.correct for item in prefix)
+
+
+def fixed_records(rows: pd.DataFrame, manifest: dict[str, Any], vlm: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+    records, signal = [], []
+    for sample_id, question in rows.groupby("sample_id", sort=False):
         for order_index, order in enumerate(manifest["orders"][sample_id]):
-            candidates = candidates_for_order(group, order)
+            ordered = candidates(question, order)
             for n in (1, 2, 4, 8, 16, 32):
-                prefix = candidates[:n]
-                oracle = any(is_correct(candidate.answer, gold, multiple_choice=multiple_choice) for candidate in prefix)
-                distinct = len({candidate.answer for candidate in prefix})
-                for name, aggregation, score in method_specs(is_vlm):
-                    selected = choose(prefix, aggregation, score)
-                    records.append({
-                        "sample_id": sample_id, "order": order_index, "budget": n, "method": name,
-                        "selected_answer": selected, "correct": is_correct(selected, gold, multiple_choice=multiple_choice),
-                        "oracle": oracle, "token_cost": sum(candidate.token_count for candidate in (prefix[:1] if name == "firstans" else prefix)),
-                        "distinct_answers": distinct, "correct_available_but_missed": oracle and not is_correct(selected, gold, multiple_choice=multiple_choice),
-                    })
-            if len(candidates) == 32:
-                for candidate in candidates:
-                    signal_records.append({"sample_id": sample_id, "order": order_index, "rollout_id": candidate.rollout_id,
-                                           "length": candidate.token_count, "mean_logp": candidate.mean_logp,
-                                           "self_certainty": candidate.self_certainty, "vision": candidate.vision,
-                                           "visconf": candidate.visconf,
-                                           "correct": is_correct(candidate.answer, gold, multiple_choice=multiple_choice)})
-    return pd.DataFrame(records), pd.DataFrame(signal_records)
+                prefix, oracle = ordered[:n], any(item.correct for item in ordered[:n])
+                for name, aggregation, score in methods(vlm):
+                    answer = choose(prefix, aggregation, score)
+                    consumed = prefix[:1] if name == "firstans" else prefix
+                    records.append({"sample_id": sample_id, "order": order_index, "budget": n, "method": name,
+                                    "candidate_ids": json.dumps([item.rollout_id for item in consumed]), "selected_answer": answer,
+                                    "correct": selection_correct(prefix, answer), "oracle": oracle,
+                                    "token_cost": sum(item.token_count for item in consumed), "distinct_answer_groups": len({item.answer for item in prefix}),
+                                    "correct_available_but_missed": oracle and not selection_correct(prefix, answer)})
+            for item in ordered:
+                signal.append({"sample_id": sample_id, "order": order_index, "rollout_id": item.rollout_id, "length": item.token_count,
+                               "mean_logp": item.mean_logp, "self_certainty": item.self_certainty, "vision": item.vision,
+                               "visconf": item.visconf, "visconf_token": item.tokenwise_visconf, "correct": item.correct})
+    return pd.DataFrame(records), pd.DataFrame(signal)
 
 
-def evaluate_adaptive(rows: pd.DataFrame, manifest: dict[str, Any], is_vlm: bool) -> pd.DataFrame:
-    records: list[dict[str, Any]] = []
-    score_name = "visconf" if is_vlm else "self_certainty"
-    policies = [("agreement", tau, None) for tau in (.5, .625, .75, .875, 1.0)]
-    policies += [("quality_aware", tau, gamma) for tau in (.5, .625, .75, .875, 1.0) for gamma in (0, .1, .25, .5)]
-    policies.append(("fixed_32", 1.0, None))
-    for sample_id, group in rows.groupby(rows.sample_id.astype(str), sort=False):
-        gold, multiple_choice = group.gold.iloc[0], bool(group.multiple_choice.iloc[0])
+def adaptive_records(rows: pd.DataFrame, manifest: dict[str, Any], vlm: bool) -> pd.DataFrame:
+    policies = [("agreement", tau, None) for tau in (.5, .625, .75, .875, 1.)] + [("quality_aware", tau, gamma)
+        for tau in (.5, .625, .75, .875, 1.) for gamma in (0., .1, .25, .5)] + [("fixed_32", 1., None)]
+    score = "visconf" if vlm else "self_certainty"
+    records = []
+    for sample_id, question in rows.groupby("sample_id", sort=False):
         for order_index, order in enumerate(manifest["orders"][sample_id]):
-            candidates = candidates_for_order(group, order)
+            ordered = candidates(question, order)
+            fixed_answer = choose(ordered, "self_consistency")
+            fixed_correct = selection_correct(ordered, fixed_answer)
             for family, tau, gamma in policies:
-                consumed, selected = (32, choose(candidates, "self_consistency")) if family == "fixed_32" else adaptive_stop(
-                    candidates, tau=tau, gamma=gamma, score_name=score_name if gamma is not None else None
-                )
+                consumed, answer, reason = (32, fixed_answer, "fixed_32") if family == "fixed_32" else adaptive_stop(
+                    ordered, tau=tau, gamma=gamma, score_name=score if gamma is not None else None)
+                selected_correct = selection_correct(ordered[:consumed], answer)
                 records.append({"sample_id": sample_id, "order": order_index, "family": family, "tau": tau, "gamma": gamma,
-                                "consumed": consumed, "token_cost": sum(candidate.token_count for candidate in candidates[:consumed]),
-                                "selected_answer": selected, "correct": is_correct(selected, gold, multiple_choice=multiple_choice)})
+                                "consumed": consumed, "stopping_reason": reason, "token_cost": sum(item.token_count for item in ordered[:consumed]),
+                                "selected_answer": answer, "correct": selected_correct, "fixed32_correct": fixed_correct,
+                                "incorrect_early_stop_recovered_at_32": consumed < 32 and not selected_correct and fixed_correct})
     return pd.DataFrame(records)
 
 
-def select_adaptive(dev: pd.DataFrame) -> pd.DataFrame:
-    fixed_accuracy = dev[dev.family == "fixed_32"].correct.mean()
-    options = dev[dev.family != "fixed_32"].groupby(["family", "tau", "gamma"], dropna=False).agg(
-        accuracy=("correct", "mean"), token_cost=("token_cost", "mean"), rollouts=("consumed", "mean")
-    ).reset_index()
-    feasible = options[options.accuracy >= fixed_accuracy - .01]
-    chosen = feasible.sort_values(["token_cost", "accuracy", "tau", "gamma"], ascending=[True, False, True, True]).groupby("family").head(1)
-    return chosen
+def summary(records: pd.DataFrame, ids: set[str]) -> pd.DataFrame:
+    subset = records[records.sample_id.isin(ids)]
+    return subset.groupby(["budget", "method"], as_index=False).agg(accuracy=("correct", "mean"), oracle_coverage=("oracle", "mean"),
+        token_cost=("token_cost", "mean"), distinct_answer_groups=("distinct_answer_groups", "mean"),
+        no_correct_candidate=("oracle", lambda values: 1 - values.mean()), selection_misses=("correct_available_but_missed", "mean"))
 
 
-def summarize_fixed(records: pd.DataFrame, split_ids: set[str]) -> pd.DataFrame:
-    subset = records[records.sample_id.isin(split_ids)]
-    return subset.groupby(["budget", "method"], as_index=False).agg(
-        accuracy=("correct", "mean"), oracle_coverage=("oracle", "mean"), token_cost=("token_cost", "mean"),
-        distinct_answer_groups=("distinct_answers", "mean"), selection_misses=("correct_available_but_missed", "mean")
-    )
-
-
-def bootstrap_accuracy_differences(records: pd.DataFrame, split_ids: set[str], seed: int) -> pd.DataFrame:
-    """Paired question-level 95% CIs against fixed-budget self-consistency."""
-    heldout = records[records.sample_id.isin(split_ids)]
-    per_question = heldout.groupby(["sample_id", "budget", "method"], as_index=False).correct.mean()
-    baseline = per_question[per_question.method == "self_consistency"].rename(columns={"correct": "baseline"})
-    rng = np.random.default_rng(seed)
-    reports: list[dict[str, Any]] = []
-    for (budget, method), current in per_question.groupby(["budget", "method"]):
+def bootstrap(records: pd.DataFrame, ids: set[str], seed: int) -> pd.DataFrame:
+    grouped = records[records.sample_id.isin(ids)].groupby(["sample_id", "budget", "method"], as_index=False).correct.mean()
+    base = grouped[grouped.method == "self_consistency"][["sample_id", "budget", "correct"]].rename(columns={"correct": "baseline"})
+    rng, output = np.random.default_rng(seed), []
+    for (budget, method), frame in grouped.groupby(["budget", "method"]):
         if method == "self_consistency":
             continue
-        paired = current.merge(baseline[baseline.budget == budget][["sample_id", "baseline"]], on="sample_id", how="inner")
-        delta = (paired.correct - paired.baseline).to_numpy(dtype=float)
-        if not len(delta):
-            continue
-        draws = np.mean(rng.choice(delta, size=(1000, len(delta)), replace=True), axis=1)
-        reports.append({"budget": budget, "method": method, "accuracy_difference_vs_self_consistency": float(delta.mean()),
-                        "ci95_low": float(np.quantile(draws, .025)), "ci95_high": float(np.quantile(draws, .975)),
-                        "questions": int(len(delta)), "bootstrap_resamples": 1000})
-    return pd.DataFrame(reports)
+        paired = frame.merge(base[base.budget == budget], on=["sample_id", "budget"])
+        delta = paired.correct.astype(float).to_numpy() - paired.baseline.astype(float).to_numpy()
+        draws = rng.choice(delta, size=(1000, len(delta)), replace=True).mean(axis=1)
+        output.append({"budget": budget, "method": method, "accuracy_difference_vs_self_consistency": float(delta.mean()),
+                       "ci95_low": float(np.quantile(draws, .025)), "ci95_high": float(np.quantile(draws, .975)), "bootstrap_resamples": 1000})
+    return pd.DataFrame(output)
 
 
-def signal_summary(signals: pd.DataFrame) -> pd.DataFrame:
-    """Within-question signal checks, including the required quartile contrasts."""
-    reports: list[dict[str, Any]] = []
-    for score in ("mean_logp", "self_certainty", "vision", "visconf"):
-        if score not in signals:
-            continue
-        differences: list[float] = []
-        for _, group in signals.groupby(["sample_id", "order"]):
-            if len(group) < 4 or group[score].nunique() <= 1:
-                continue
-            ordered = group.sort_values(score)
-            width = max(1, len(ordered) // 4)
-            differences.append(float(ordered.tail(width).correct.mean() - ordered.head(width).correct.mean()))
-        if differences:
-            reports.append({"analysis": "top_minus_bottom_correctness_quartile", "signal": score,
-                            "mean_difference": float(np.mean(differences)), "questions_orders": len(differences)})
-    shortest = signals.loc[signals.groupby(["sample_id", "order"]).length.idxmin()]
-    reports.append({"analysis": "shortest_rollout_control", "signal": "length", "mean_difference": float(shortest.correct.mean()),
-                    "questions_orders": int(len(shortest))})
-    return pd.DataFrame(reports)
+def signal_report(signal: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    scores = ("mean_logp", "self_certainty", "vision", "visconf", "visconf_token")
+    for score in scores:
+        top_bottom, length_correlations, correctness_correlations = [], [], []
+        for _, group in signal.groupby(["sample_id", "order"]):
+            ordered, width = group.sort_values(score), max(1, len(group) // 4)
+            top_bottom.append(ordered.tail(width)["correct"].mean() - ordered.head(width)["correct"].mean())
+            length_correlations.append(group["length"].corr(group[score], method="spearman"))
+            correctness_correlations.append(group["correct"].astype(float).corr(group[score], method="spearman"))
+        rows += [{"analysis": "top_minus_bottom_quartile_correctness", "signal": score, "value": float(np.nanmean(top_bottom))},
+                 {"analysis": "within_question_length_score_spearman", "signal": score, "value": float(np.nanmean(length_correlations))},
+                 {"analysis": "within_question_correctness_score_spearman", "signal": score, "value": float(np.nanmean(correctness_correlations))}]
+    shortest = signal.loc[signal.groupby(["sample_id", "order"])["length"].idxmin()]
+    rows.append({"analysis": "shortest_rollout_accuracy", "signal": "length", "value": float(shortest["correct"].mean())})
+    if signal["vision"].nunique() > 1:
+        correlations = [group["self_certainty"].corr(group["vision"], method="spearman") for _, group in signal.groupby(["sample_id", "order"])]
+        rows.append({"analysis": "confidence_vision_spearman", "signal": "self_certainty_vs_vision", "value": float(np.nanmean(correlations))})
+        rows.append({"analysis": "mean_tokenwise_minus_trajectory_visconf", "signal": "visconf_token_minus_visconf",
+                     "value": float((signal["visconf_token"] - signal["visconf"]).mean())})
+    return pd.DataFrame(rows)
+
+
+def select_policies(dev: pd.DataFrame) -> pd.DataFrame:
+    fixed = dev[dev.family == "fixed_32"].correct.mean()
+    options = dev[dev.family != "fixed_32"].groupby(["family", "tau", "gamma"], dropna=False).agg(
+        accuracy=("correct", "mean"), token_cost=("token_cost", "mean"), mean_rollouts=("consumed", "mean")).reset_index()
+    viable = options[options.accuracy >= fixed - .01]
+    return viable.sort_values(["family", "token_cost", "accuracy", "tau", "gamma"], ascending=[True, True, False, True, True]).groupby("family").head(1)
+
+
+def adaptive_summary(heldout: pd.DataFrame, policies: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    selected = heldout.merge(policies[["family", "tau", "gamma"]], on=["family", "tau", "gamma"], how="inner")
+    aggregate = selected.groupby("family", as_index=False).agg(accuracy=("correct", "mean"), token_cost=("token_cost", "mean"),
+        mean_rollouts=("consumed", "mean"), incorrect_early_stops_recovered_at_32=("incorrect_early_stop_recovered_at_32", "mean"))
+    return aggregate, selected.groupby(["family", "consumed"], as_index=False).size().rename(columns={"size": "orders"})
+
+
+def qualitative(records: pd.DataFrame, ids: set[str]) -> list[dict[str, Any]]:
+    rows = records[(records.sample_id.isin(ids)) & (records.budget == 32)]
+    selected = []
+    for sample_id, question in rows.groupby("sample_id"):
+        answers = question.groupby("method").selected_answer.first().to_dict()
+        if len(set(answers.values())) > 1:
+            selected.append({"sample_id": sample_id, "answers_by_method": answers, "selection_rule": "first held-out question with a method disagreement"})
+        if len(selected) == 12:
+            break
+    return selected
 
 
 def run(config: dict[str, Any]) -> None:
-    root = Path(config["input_root"]).expanduser()
-    output = Path(config.get("output_dir", "results/task3/offline")).expanduser()
+    root, output = Path(config["input_root"]).expanduser(), Path(config.get("output_dir", "results/task3/offline")).expanduser()
     output.mkdir(parents=True, exist_ok=True)
-    all_summary: list[pd.DataFrame] = []
-    for source in config["sources"]:
-        print(f"Loading {source['name']} rollout tables...", flush=True)
-        rows, details = load_source(source, root)
-        print(f"  {details['questions']} questions, {details['rows']} rollouts", flush=True)
-        dataset_output = output / source["name"]
+    all_summaries = []
+    for spec in config["sources"]:
+        print(f"Loading and validating {spec['name']}...", flush=True)
+        rows, metadata = load_source(spec, root)
+        dataset_output = output / spec["name"]
         manifest = build_manifest(rows, dataset_output, int(config.get("seed", 6304)), int(config.get("orders", 10)))
-        fixed, signals = evaluate_fixed(rows, manifest, bool(source.get("attention_metrics")))
-        adaptive = evaluate_adaptive(rows, manifest, bool(source.get("attention_metrics")))
-        fixed.to_parquet(dataset_output / "per_question_fixed.parquet", index=False)
-        adaptive.to_parquet(dataset_output / "per_question_adaptive.parquet", index=False)
-        signals.to_parquet(dataset_output / "signal_records.parquet", index=False)
+        fixed, signals = fixed_records(rows, manifest, bool(spec.get("attention_metrics")))
+        adaptive = adaptive_records(rows, manifest, bool(spec.get("attention_metrics")))
+        for name, table in (("per_question_fixed.parquet", fixed), ("per_question_adaptive.parquet", adaptive), ("signal_records.parquet", signals)):
+            dataset_output.mkdir(parents=True, exist_ok=True)
+            table.to_parquet(dataset_output / name, index=False)
         dev_ids, test_ids = set(manifest["dev_ids"]), set(manifest["test_ids"])
-        dev_summary, test_summary = summarize_fixed(fixed, dev_ids), summarize_fixed(fixed, test_ids)
-        dev_summary["split"], test_summary["split"] = "development", "heldout"
-        selected = select_adaptive(adaptive[adaptive.sample_id.isin(dev_ids)])
-        selected.to_csv(dataset_output / "adaptive_selected_on_development.csv", index=False)
-        heldout_adaptive = adaptive[adaptive.sample_id.isin(test_ids)].merge(selected[["family", "tau", "gamma"]], on=["family", "tau", "gamma"], how="inner")
-        adaptive_summary = heldout_adaptive.groupby("family", as_index=False).agg(accuracy=("correct", "mean"), token_cost=("token_cost", "mean"), rollouts=("consumed", "mean"))
-        dev_summary.to_csv(dataset_output / "fixed_development_summary.csv", index=False)
-        test_summary.to_csv(dataset_output / "fixed_heldout_summary.csv", index=False)
-        adaptive_summary.to_csv(dataset_output / "adaptive_heldout_summary.csv", index=False)
-        bootstrap_accuracy_differences(fixed, test_ids, int(config.get("seed", 6304))).to_csv(
-            dataset_output / "fixed_heldout_bootstrap.csv", index=False
-        )
-        signal_summary(signals).to_csv(dataset_output / "signal_summary.csv", index=False)
-        all_summary.extend([dev_summary.assign(source=source["name"]), test_summary.assign(source=source["name"])])
-        write_json(dataset_output / "run_metadata.json", {**details, "normalizer": "conservative_builtin_v1", "seed": config.get("seed", 6304), "orders": config.get("orders", 10)})
-        print(f"Saved Task 3 offline results: {dataset_output}", flush=True)
-    pd.concat(all_summary, ignore_index=True).to_csv(output / "all_fixed_summaries.csv", index=False)
+        development, heldout = summary(fixed, dev_ids), summary(fixed, test_ids)
+        development.assign(split="development").to_csv(dataset_output / "fixed_development_summary.csv", index=False)
+        heldout.assign(split="heldout").to_csv(dataset_output / "fixed_heldout_summary.csv", index=False)
+        bootstrap(fixed, test_ids, int(config.get("seed", 6304))).to_csv(dataset_output / "fixed_heldout_bootstrap.csv", index=False)
+        signal_report(signals).to_csv(dataset_output / "signal_summary.csv", index=False)
+        policies = select_policies(adaptive[adaptive.sample_id.isin(dev_ids)])
+        policies.to_csv(dataset_output / "adaptive_selected_on_development.csv", index=False)
+        aggregate, distribution = adaptive_summary(adaptive[adaptive.sample_id.isin(test_ids)], policies)
+        aggregate.to_csv(dataset_output / "adaptive_heldout_summary.csv", index=False)
+        distribution.to_csv(dataset_output / "adaptive_stopping_distribution.csv", index=False)
+        write_json(dataset_output / "qualitative_selection_disagreements.json", qualitative(fixed, test_ids))
+        write_json(dataset_output / "run_metadata.json", {**metadata, "scorer_version": SCORER_VERSION, "seed": config.get("seed", 6304), "orders": config.get("orders", 10)})
+        all_summaries += [development.assign(source=spec["name"], split="development"), heldout.assign(source=spec["name"], split="heldout")]
+        print(f"Saved {spec['name']} offline Task 3 results.", flush=True)
+    pd.concat(all_summaries, ignore_index=True).to_csv(output / "all_fixed_summaries.csv", index=False)
 
 
 def main() -> None:

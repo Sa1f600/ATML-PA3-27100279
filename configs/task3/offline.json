@@ -17,7 +17,8 @@
       "multiple_choice": true,
       "generations": "qwen2.5-vl-3b-instruct/generations.parquet",
       "probability_metrics": "qwen2.5-vl-3b-instruct/probability_metrics.parquet",
-      "attention_metrics": "qwen2.5-vl-3b-instruct/attention_metrics.parquet"
+      "attention_metrics": "qwen2.5-vl-3b-instruct/attention_metrics.parquet",
+      "question_metadata": "mathvista_question_metadata.parquet"
     }
   ]
 }
