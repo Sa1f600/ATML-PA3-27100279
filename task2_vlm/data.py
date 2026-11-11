@@ -201,10 +201,19 @@ def prepare_manifests(cfg):
     print(f"Prepared Task 2 manifest at {out}; cache visual features next.", flush=True)
 
 
-def cache_features(cfg, batch_size=32):
+def cache_features(cfg, batch_size=32, scope="all"):
     from transformers import AutoProcessor, SiglipVisionModel
-    data = read_json(Path(cfg["prepared_dir"])/"manifest.json"); rows = [r for value in data.values() if isinstance(value, list) for r in value]
+    data = read_json(Path(cfg["prepared_dir"])/"manifest.json")
+    scopes = {
+        "all": [r for value in data.values() if isinstance(value, list) for r in value],
+        "dev": data["caption_dev"] + data["annotation_dev"] + data["natural_dev"],
+        "final": data["annotation_final"] + data["natural_final"],
+    }
+    if scope not in scopes:
+        raise ValueError(f"Unknown feature-cache scope: {scope}")
+    rows = scopes[scope]
     images = {int(r["image_id"]): r["image_path"] for r in rows}; out = Path(cfg["feature_dir"]); out.mkdir(parents=True, exist_ok=True)
+    print(f"Caching {len(images):,} unique {scope} image features...", flush=True)
     processor = AutoProcessor.from_pretrained(cfg["vision_model_id"]); model = SiglipVisionModel.from_pretrained(cfg["vision_model_id"], torch_dtype=torch.float16).cuda().eval()
     ids = [i for i in sorted(images) if not (out/f"{i}.pt").exists()]
     for start in range(0, len(ids), batch_size):

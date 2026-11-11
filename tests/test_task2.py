@@ -3,6 +3,7 @@ from task2_vlm.metrics import bootstrap_pair_difference, exact_score, normalize_
 from task2_vlm.model import Connector
 from task2_vlm.train import CurriculumSampler, gradients_are_finite
 from task2_vlm.data import annotation_pairs, complementary_pairs, consensus
+from task2_vlm.evaluate import fixed_mismatch_mapping, summarize_suite
 
 def test_vqa_normalization_and_soft_consensus():
     assert normalize_answer('The, Two!') == '2'
@@ -73,3 +74,30 @@ def test_gradient_finiteness_guard_detects_overflow_before_a_step():
     assert gradients_are_finite([parameter])
     parameter.grad = torch.tensor([float("inf")])
     assert not gradients_are_finite([parameter])
+
+
+def test_final_evaluation_mismatch_mapping_is_fixed_and_excludes_each_pair(tmp_path):
+    rows = [
+        {"pair_id": "p1", "image_id": 1, "partner_image_id": 2},
+        {"pair_id": "p1", "image_id": 2, "partner_image_id": 1},
+        {"pair_id": "p2", "image_id": 3, "partner_image_id": 4},
+        {"pair_id": "p2", "image_id": 4, "partner_image_id": 3},
+    ]
+    path = tmp_path / "mapping.json"
+    mapping = fixed_mismatch_mapping(rows, path)
+    assert mapping == fixed_mismatch_mapping(rows, path)
+    assert mapping["p1"] not in {1, 2}
+    assert mapping["p2"] not in {3, 4}
+
+
+def test_final_evaluation_summary_requires_complete_pairs():
+    records = []
+    for pair_id in ("p1", "p2"):
+        for condition in ("correct", "swap", "mismatch", "no_image"):
+            for image_id in (1, 2):
+                records.append({"pair_id": pair_id, "image_id": image_id, "condition": condition,
+                                "prediction": "yes", "score": int(condition == "correct"),
+                                "reference_nll": 1.0, "seconds": 0.1})
+    summary = summarize_suite(records)
+    assert summary["mean_accuracy"]["correct"] == 1
+    assert summary["mean_accuracy"]["swap"] == 0
