@@ -33,6 +33,7 @@ ALIASES = {
     "generated": ("generated_attention", "attention_generated", "generated"),
     "answer_type": ("answer_type", "question_type", "type"),
     "precision": ("precision", "answer_precision", "decimal_places"),
+    "choices": ("choices", "options", "answer_choices"),
 }
 
 
@@ -47,7 +48,11 @@ def write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
-def column(frame: pd.DataFrame, name: str, required: bool = True) -> str | None:
+def column(frame: pd.DataFrame, name: str, required: bool = True, configured: dict[str, str] | None = None) -> str | None:
+    if configured and name in configured:
+        if configured[name] not in frame.columns:
+            raise ValueError(f"Configured metadata column {configured[name]!r} for {name!r} does not exist.")
+        return configured[name]
     result = next((candidate for candidate in ALIASES[name] if candidate in frame.columns), None)
     if result is None and required:
         raise ValueError(f"Missing {name!r}; expected one of {ALIASES[name]}, found {list(frame.columns)}")
@@ -85,15 +90,34 @@ def metadata_for_source(spec: dict[str, Any], root: Path, rows: pd.DataFrame) ->
         return rows
     path = _path(root, metadata_path)
     metadata = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_json(path)
-    source_id = column(metadata, "sample_id")
-    answer_type, precision = column(metadata, "answer_type", required=False), column(metadata, "precision", required=False)
+    mapping = spec.get("metadata_columns", {})
+    source_id = column(metadata, "sample_id", configured=mapping)
+    answer_type = column(metadata, "answer_type", required=False, configured=mapping)
+    precision = column(metadata, "precision", required=False, configured=mapping)
+    choices = column(metadata, "choices", required=False, configured=mapping)
     selected = pd.DataFrame({"sample_id": metadata[source_id].astype(str)})
     selected["multiple_choice"] = (metadata[answer_type].astype(str).str.lower().str.contains("multi|choice|option")
                                    if answer_type else bool(spec.get("multiple_choice", False)))
     selected["precision"] = pd.to_numeric(metadata[precision], errors="coerce") if precision else np.nan
+    selected["choice_options"] = metadata[choices].map(parse_choices) if choices else [()] * len(metadata)
     rows = rows.drop(columns=["multiple_choice", "precision"]).merge(selected, on="sample_id", how="left", validate="many_to_one")
     rows["multiple_choice"] = rows["multiple_choice"].fillna(bool(spec.get("multiple_choice", False))).astype(bool)
     return rows
+
+
+def parse_choices(value: Any) -> tuple[str, ...]:
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            if isinstance(decoded, list):
+                return tuple(str(item) for item in decoded)
+        except json.JSONDecodeError:
+            pass
+    return ()
 
 
 def load_source(spec: dict[str, Any], root: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -179,9 +203,10 @@ def load_source(spec: dict[str, Any], root: Path) -> tuple[pd.DataFrame, dict[st
         precision = question.precision.iloc[0]
         precision = int(precision) if pd.notna(precision) else None
         multiple_choice = bool(question.multiple_choice.iloc[0])
-        question_groups = group_answers(question.raw_answer, dataset=spec["dataset"], multiple_choice=multiple_choice, precision=precision)
+        choices = tuple(question.choice_options.iloc[0]) if "choice_options" in question and question.choice_options.iloc[0] else None
+        question_groups = group_answers(question.raw_answer, dataset=spec["dataset"], multiple_choice=multiple_choice, precision=precision, choices=choices)
         groups.extend(question_groups)
-        correctness.extend(answer_equivalent(answer, question.gold.iloc[0], dataset=spec["dataset"], multiple_choice=multiple_choice, precision=precision)
+        correctness.extend(answer_equivalent(answer, question.gold.iloc[0], dataset=spec["dataset"], multiple_choice=multiple_choice, precision=precision, choices=choices)
                            for answer in question.raw_answer)
     rows["answer_group"], rows["correct"] = groups, correctness
     counts = rows.groupby("sample_id").rollout_id.nunique()
@@ -246,7 +271,8 @@ def fixed_records(rows: pd.DataFrame, manifest: dict[str, Any], vlm: bool) -> tu
             for item in ordered:
                 signal.append({"sample_id": sample_id, "order": order_index, "rollout_id": item.rollout_id, "length": item.token_count,
                                "mean_logp": item.mean_logp, "self_certainty": item.self_certainty, "vision": item.vision,
-                               "visconf": item.visconf, "visconf_token": item.tokenwise_visconf, "correct": item.correct})
+                               "visconf": item.visconf, "visconf_token": item.tokenwise_visconf, "token_confidence": list(item.token_confidence),
+                               "token_vision": list(item.token_vision), "correct": item.correct})
     return pd.DataFrame(records), pd.DataFrame(signal)
 
 
@@ -295,22 +321,32 @@ def bootstrap(records: pd.DataFrame, ids: set[str], seed: int) -> pd.DataFrame:
 
 def signal_report(signal: pd.DataFrame) -> pd.DataFrame:
     rows = []
+    def finite_mean(values: Iterable[float]) -> float:
+        valid = [value for value in values if pd.notna(value)]
+        return float(np.mean(valid)) if valid else float("nan")
     scores = ("mean_logp", "self_certainty", "vision", "visconf", "visconf_token")
     for score in scores:
         top_bottom, length_correlations, correctness_correlations = [], [], []
         for _, group in signal.groupby(["sample_id", "order"]):
             ordered, width = group.sort_values(score), max(1, len(group) // 4)
             top_bottom.append(ordered.tail(width)["correct"].mean() - ordered.head(width)["correct"].mean())
-            length_correlations.append(group["length"].corr(group[score], method="spearman"))
-            correctness_correlations.append(group["correct"].astype(float).corr(group[score], method="spearman"))
-        rows += [{"analysis": "top_minus_bottom_quartile_correctness", "signal": score, "value": float(np.nanmean(top_bottom))},
-                 {"analysis": "within_question_length_score_spearman", "signal": score, "value": float(np.nanmean(length_correlations))},
-                 {"analysis": "within_question_correctness_score_spearman", "signal": score, "value": float(np.nanmean(correctness_correlations))}]
+            length_correlations.append(group["length"].corr(group[score], method="spearman")
+                                       if group["length"].nunique() > 1 and group[score].nunique() > 1 else float("nan"))
+            correctness_correlations.append(group["correct"].astype(float).corr(group[score], method="spearman")
+                                            if group["correct"].nunique() > 1 and group[score].nunique() > 1 else float("nan"))
+        rows += [{"analysis": "top_minus_bottom_quartile_correctness", "signal": score, "value": finite_mean(top_bottom)},
+                 {"analysis": "within_question_length_score_spearman", "signal": score, "value": finite_mean(length_correlations)},
+                 {"analysis": "within_question_correctness_score_spearman", "signal": score, "value": finite_mean(correctness_correlations)}]
     shortest = signal.loc[signal.groupby(["sample_id", "order"])["length"].idxmin()]
     rows.append({"analysis": "shortest_rollout_accuracy", "signal": "length", "value": float(shortest["correct"].mean())})
     if signal["vision"].nunique() > 1:
-        correlations = [group["self_certainty"].corr(group["vision"], method="spearman") for _, group in signal.groupby(["sample_id", "order"])]
-        rows.append({"analysis": "confidence_vision_spearman", "signal": "self_certainty_vs_vision", "value": float(np.nanmean(correlations))})
+        token_correlations = []
+        for _, rollout in signal.groupby(["sample_id", "order", "rollout_id"]):
+            confidence, vision = rollout.iloc[0]["token_confidence"], rollout.iloc[0]["token_vision"]
+            if len(confidence) >= 2 and np.std(confidence) > 0 and np.std(vision) > 0:
+                token_correlations.append(float(np.corrcoef(confidence, vision)[0, 1]))
+        rows.append({"analysis": "within_rollout_token_confidence_vision_pearson", "signal": "confidence_vs_vision",
+                     "value": finite_mean(token_correlations), "rollouts": len(token_correlations)})
         rows.append({"analysis": "mean_tokenwise_minus_trajectory_visconf", "signal": "visconf_token_minus_visconf",
                      "value": float((signal["visconf_token"] - signal["visconf"]).mean())})
     return pd.DataFrame(rows)

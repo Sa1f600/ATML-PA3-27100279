@@ -1,6 +1,7 @@
-from task3_test_time.core import Candidate, adaptive_stop, attach_visconf, choose, group_answers, rank_weights
-from task3_test_time.offline import load_source
+from task3_test_time.core import Candidate, adaptive_stop, attach_visconf, choose, group_answers, normalise_answer, rank_weights
+from task3_test_time.offline import load_source, signal_report
 import pandas as pd
+import pytest
 
 
 def candidates():
@@ -44,6 +45,10 @@ def test_missing_answers_share_one_group_without_gold():
     assert group_answers([None, "", "2/4", "1/2"], dataset="MATH") == ["__NO_ANSWER__", "__NO_ANSWER__", "num:1/2", "num:1/2"]
 
 
+def test_choice_text_maps_to_its_option_letter():
+    assert normalise_answer("the blue square", multiple_choice=True, choices=("red circle", "blue square")) == "B"
+
+
 def test_loader_preserves_and_validates_token_level_vlm_arrays(tmp_path):
     rows = [{"sample_id": f"q{i:04d}", "rollout_id": f"r{rollout}", "extracted_answer": "A", "gold_answer": "A",
              "generated_token_ids": [1, 2]} for i in range(1000) for rollout in range(32)]
@@ -52,7 +57,8 @@ def test_loader_preserves_and_validates_token_level_vlm_arrays(tmp_path):
     probability["logp"], probability["kl_u_p"] = [[-.1, -.2]] * len(probability), [[.2, .4]] * len(probability)
     attention = generations[["sample_id", "rollout_id"]].copy()
     attention["image_attention"], attention["prompt_attention"], attention["generated_attention"] = [[1., 1.]] * len(attention), [[1., 1.]] * len(attention), [[2., 2.]] * len(attention)
-    metadata = pd.DataFrame({"sample_id": [f"q{i:04d}" for i in range(1000)], "answer_type": "multiple choice", "precision": 0})
+    metadata = pd.DataFrame({"sample_id": [f"q{i:04d}" for i in range(1000)], "answer_type": "multiple choice", "precision": 0,
+                             "choices": [["wrong", "A"]] * 1000})
     generations.to_parquet(tmp_path / "g.parquet")
     probability.to_parquet(tmp_path / "p.parquet")
     attention.to_parquet(tmp_path / "a.parquet")
@@ -63,3 +69,16 @@ def test_loader_preserves_and_validates_token_level_vlm_arrays(tmp_path):
     assert len(loaded) == 32000
     assert loaded.iloc[0].token_kls == [.2, .4]
     assert loaded.iloc[0].token_vision == [.25, .25]
+    assert loaded.iloc[0].choice_options == ("wrong", "A")
+
+
+def test_signal_report_uses_within_rollout_token_correlation():
+    signal = pd.DataFrame([
+        {"sample_id": "q", "order": 0, "rollout_id": "a", "length": 2, "mean_logp": -.1, "self_certainty": .5,
+         "vision": .5, "visconf": .2, "visconf_token": .3, "token_confidence": [.1, .9], "token_vision": [.1, .9], "correct": True},
+        {"sample_id": "q", "order": 0, "rollout_id": "b", "length": 2, "mean_logp": -.2, "self_certainty": .4,
+         "vision": .4, "visconf": .1, "visconf_token": .2, "token_confidence": [.2, .8], "token_vision": [.2, .8], "correct": False},
+    ])
+    report = signal_report(signal)
+    value = report.loc[report.analysis == "within_rollout_token_confidence_vision_pearson", "value"].iloc[0]
+    assert value == pytest.approx(1.0)

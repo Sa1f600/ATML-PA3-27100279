@@ -24,14 +24,22 @@ def _text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value).replace("−", "-").replace("–", "-")).strip()
 
 
-def normalise_answer(value: Any, *, multiple_choice: bool = False, precision: int | None = None) -> str:
+def normalise_answer(value: Any, *, multiple_choice: bool = False, precision: int | None = None,
+                     choices: tuple[str, ...] | None = None) -> str:
     """Create a conservative canonical key; equivalence is handled separately."""
     if value is None or not _text(value):
         return NO_ANSWER
     text = _text(value)
     if multiple_choice:
-        choices = re.findall(r"\b([A-E])\b", text.upper())
-        return choices[-1] if choices else NO_ANSWER
+        choice_letters = re.findall(r"\b([A-E])\b", text.upper())
+        if choice_letters:
+            return choice_letters[-1]
+        if choices is not None:
+            candidate = re.sub(r"^(?:the answer is|answer is|answer:|the)\s+", "", _text(text).casefold()).rstrip(". ")
+            for index, option in enumerate(choices):
+                if candidate == _text(option).casefold().rstrip(". "):
+                    return chr(ord("A") + index)
+        return NO_ANSWER
     text = re.sub(r"^\\boxed\{(.*)\}$", r"\1", text).replace(",", "").lower()
     if precision is not None:
         try:
@@ -65,26 +73,27 @@ def math_equivalent(left: Any, right: Any) -> bool:
 
 
 def answer_equivalent(left: Any, right: Any, *, dataset: str, multiple_choice: bool = False,
-                      precision: int | None = None) -> bool:
+                      precision: int | None = None, choices: tuple[str, ...] | None = None) -> bool:
     if multiple_choice:
-        return normalise_answer(left, multiple_choice=True) == normalise_answer(right, multiple_choice=True) != NO_ANSWER
+        return (normalise_answer(left, multiple_choice=True, choices=choices) ==
+                normalise_answer(right, multiple_choice=True, choices=choices) != NO_ANSWER)
     if dataset.lower() == "math":
         return math_equivalent(left, right)
     return normalise_answer(left, precision=precision) == normalise_answer(right, precision=precision) != NO_ANSWER
 
 
 def group_answers(values: Iterable[Any], *, dataset: str, multiple_choice: bool = False,
-                  precision: int | None = None) -> list[str]:
+                  precision: int | None = None, choices: tuple[str, ...] | None = None) -> list[str]:
     """Group predictions without looking at a gold answer."""
     representatives: list[tuple[str, Any]] = []
     groups: list[str] = []
     for value in values:
-        canonical = normalise_answer(value, multiple_choice=multiple_choice, precision=precision)
+        canonical = normalise_answer(value, multiple_choice=multiple_choice, precision=precision, choices=choices)
         if canonical == NO_ANSWER:
             groups.append(NO_ANSWER)
             continue
         matched = next((key for key, representative in representatives if answer_equivalent(
-            value, representative, dataset=dataset, multiple_choice=multiple_choice, precision=precision
+            value, representative, dataset=dataset, multiple_choice=multiple_choice, precision=precision, choices=choices
         )), None)
         if matched is None:
             matched = canonical
@@ -105,6 +114,7 @@ class Candidate:
     tokenwise_visconf: float = 0.0
     token_kls: tuple[float, ...] = ()
     token_vision: tuple[float, ...] = ()
+    token_confidence: tuple[float, ...] = ()
     correct: bool = False
 
     def score(self, name: str) -> float:
@@ -139,7 +149,7 @@ def attach_visconf(candidates: list[Candidate]) -> list[Candidate]:
             raise ValueError(f"Token alignment failure for rollout {candidate.rollout_id}: KL={len(confidence_tokens)}, vision={len(vision)}")
         visual_engagement = float(np.mean(vision)) if vision else 0.0
         tokenwise = float(np.mean([c * v for c, v in zip(confidence_tokens, vision)])) if vision else 0.0
-        scored.append(replace(candidate, vision=visual_engagement, visconf=visual_engagement * confidence,
+        scored.append(replace(candidate, vision=visual_engagement, token_confidence=confidence_tokens, visconf=visual_engagement * confidence,
                               tokenwise_visconf=tokenwise))
     return scored
 
