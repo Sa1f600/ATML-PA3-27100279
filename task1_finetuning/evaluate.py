@@ -41,7 +41,11 @@ def stable_json(value):
 
 def benchmark_lock(cfg):
     from lm_eval.tasks import TaskManager
-    if importlib.metadata.version("lm_eval") != cfg["harness_version"]:
+    # The benchmark settings are shared by all methods.  Training configs do
+    # not duplicate evaluation-only keys, but preflight may receive one of
+    # those configs while validating the benchmark definitions.
+    harness_version = cfg.get("harness_version", read_json(EVAL_CONFIG)["harness_version"])
+    if importlib.metadata.version("lm_eval") != harness_version:
         raise RuntimeError("Install the pinned lm_eval version before evaluation.")
     path = Path(cfg["manifest_dir"]) / "benchmark_lock.json"
     manager = TaskManager()
@@ -49,14 +53,14 @@ def benchmark_lock(cfg):
     meta = read_json(Path(cfg["prepared_dir"]) / "metadata.json")
     if path.exists():
         lock = read_json(path)
-        if lock["task_definition_sha256"] != hashes or lock["harness_version"] != cfg["harness_version"]:
+        if lock["task_definition_sha256"] != hashes or lock["harness_version"] != harness_version:
             raise ValueError("Harness task definitions have changed since the shared baseline.")
     else:
         api = HfApi()
         revisions = {name: api.dataset_info(spec[0]).sha for name, spec in TASKS.items()}
         revisions["gsm8k_cot"] = meta["dataset_revisions"]["gsm8k"]
         revisions["hellaswag"] = meta["dataset_revisions"]["hellaswag"]
-        lock = {"harness_version": cfg["harness_version"], "task_definition_sha256": hashes,
+        lock = {"harness_version": harness_version, "task_definition_sha256": hashes,
                 "dataset_revisions": revisions, "seed": 6304}
         write_json(path, lock)
     if (lock["dataset_revisions"]["gsm8k_cot"] != meta["dataset_revisions"]["gsm8k"] or
