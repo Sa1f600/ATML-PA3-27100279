@@ -163,9 +163,12 @@ def main() -> None:
         item, messages = questions[sample_id], [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": item["question"] + "\n\n" + INSTRUCTION}]
         torch.cuda.reset_peak_memory_stats()
+        print(f"Live question {index}/{len(sample_ids)}: generating single long response...", flush=True)
         single = generate(model, tokenizer, messages, 3072, args.seed + index * 10)
+        print(f"Live question {index}/{len(sample_ids)}: generating three parallel responses...", flush=True)
         parallel = [generate(model, tokenizer, messages, 1024, args.seed + index * 10 + branch + 1) for branch in range(3)]
         revision_messages = messages + [{"role": "assistant", "content": parallel[0]["text"]}, {"role": "user", "content": REVIEW}]
+        print(f"Live question {index}/{len(sample_ids)}: generating critique and revision...", flush=True)
         revision = generate(model, tokenizer, revision_messages, 2048, args.seed + index * 10 + 4)
         parallel_answer = self_consistency(parallel)
         def metrics(outputs: list[dict[str, Any]], answer: str) -> dict[str, Any]:
