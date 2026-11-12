@@ -79,9 +79,29 @@ def response_token_count(rows):
     return sum(sum(value != IGNORE_INDEX for value in row["labels"][1:]) for row in rows)
 
 
-def response_loss_sum(logits, labels):
-    """A sum, deliberately not a per-example or per-microbatch mean."""
-    return F.cross_entropy(
-        logits[:, :-1].contiguous().float().view(-1, logits.size(-1)),
-        labels[:, 1:].contiguous().view(-1), ignore_index=IGNORE_INDEX, reduction="sum",
-    )
+def response_loss_sum(logits, labels, token_chunk_size=64):
+    """Return the response-token cross-entropy sum without a full FP32 logits copy.
+
+    Under FP16 autocast, a full-precision copy of ``[batch, sequence,
+    vocabulary]`` can be larger than a T4's remaining memory on a long
+    sequence.  Each chunk below computes the identical summed cross-entropy
+    in FP32, but only materializes a small slice at a time.  Summing (rather
+    than averaging) preserves the assignment's effective-batch token
+    weighting when the caller divides by the shared response-token count.
+    """
+    if token_chunk_size < 1:
+        raise ValueError("token_chunk_size must be positive.")
+    shifted_logits = logits[:, :-1]
+    shifted_labels = labels[:, 1:]
+    total = torch.zeros((), device=logits.device, dtype=torch.float32)
+    for start in range(0, shifted_logits.size(1), token_chunk_size):
+        stop = min(start + token_chunk_size, shifted_logits.size(1))
+        chunk_logits = shifted_logits[:, start:stop].contiguous()
+        chunk_labels = shifted_labels[:, start:stop].contiguous()
+        # Explicit FP32 keeps the loss calculation numerically consistent
+        # with the original implementation while bounding peak memory.
+        total = total + F.cross_entropy(
+            chunk_logits.float().view(-1, logits.size(-1)),
+            chunk_labels.view(-1), ignore_index=IGNORE_INDEX, reduction="sum",
+        )
+    return total

@@ -76,6 +76,24 @@ def test_padding_and_prompt_labels_do_not_enter_loss():
     assert response_token_count(examples()) == 7
 
 
+def test_chunked_response_loss_matches_single_full_precision_calculation():
+    """The memory-safe path must retain the original token-weighted loss."""
+    batch = collate_examples(examples(), 0)
+    logits = torch.randn(3, 6, 32, requires_grad=True)
+    expected = torch.nn.functional.cross_entropy(
+        logits[:, :-1].contiguous().float().view(-1, 32),
+        batch["labels"][:, 1:].contiguous().view(-1),
+        ignore_index=-100, reduction="sum",
+    )
+    actual = response_loss_sum(logits, batch["labels"], token_chunk_size=1)
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+    expected.backward()
+    expected_grad = logits.grad.detach().clone()
+    logits.grad = None
+    actual.backward()
+    torch.testing.assert_close(logits.grad, expected_grad, rtol=1e-6, atol=1e-6)
+
+
 def test_contamination_checks_both_question_fields_and_empty_values():
     gold = {normalize_question("  What IS  ２ + 2? ")}
     assert normalize_question("What is 2 + 2?") in gold
