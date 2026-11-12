@@ -104,11 +104,19 @@ def metadata_for_source(spec: dict[str, Any], root: Path, rows: pd.DataFrame) ->
     precision = column(metadata, "precision", required=False, configured=mapping)
     choices = column(metadata, "choices", required=False, configured=mapping)
     selected = pd.DataFrame({"sample_id": metadata[source_id].astype(str)})
+    selected["_metadata_match"] = True
     selected["multiple_choice"] = (metadata[answer_type].astype(str).str.lower().str.contains("multi|choice|option")
                                    if answer_type else bool(spec.get("multiple_choice", False)))
     selected["precision"] = pd.to_numeric(metadata[precision], errors="coerce") if precision else np.nan
     selected["choice_options"] = metadata[choices].map(parse_choices) if choices else [()] * len(metadata)
     rows = rows.drop(columns=["multiple_choice", "precision"]).merge(selected, on="sample_id", how="left", validate="many_to_one")
+    if rows["_metadata_match"].isna().any():
+        missing_ids = rows.loc[rows["_metadata_match"].isna(), "sample_id"].drop_duplicates().head(10).tolist()
+        raise ValueError(
+            "Question metadata does not cover all rollout sample IDs; "
+            f"examples: {missing_ids}. Check that testmini.json matches the supplied MathVista export."
+        )
+    rows = rows.drop(columns="_metadata_match")
     rows["multiple_choice"] = rows["multiple_choice"].fillna(bool(spec.get("multiple_choice", False))).astype(bool)
     return rows
 

@@ -88,6 +88,16 @@ def test_loader_accepts_released_mathvista_json_metadata(tmp_path):
     assert loaded.choice_options.iloc[0] == ("wrong", "right")
 
 
+def test_metadata_loader_rejects_unmatched_rollout_id(tmp_path):
+    (tmp_path / "metadata.json").write_text(__import__("json").dumps({
+        "1": {"pid": "1", "question_type": "free_form", "answer_type": "text", "precision": 0, "choices": None}
+    }))
+    rows = pd.DataFrame({"sample_id": ["not-in-metadata"]})
+    loader = __import__("task3_test_time.offline", fromlist=["metadata_for_source"]).metadata_for_source
+    with pytest.raises(ValueError, match="does not cover"):
+        loader({"question_metadata": "metadata.json", "metadata_columns": {"sample_id": "pid"}}, tmp_path, rows)
+
+
 def test_signal_report_uses_within_rollout_token_correlation():
     signal = pd.DataFrame([
         {"sample_id": "q", "order": 0, "rollout_id": "a", "length": 2, "mean_logp": -.1, "self_certainty": .5,
