@@ -73,6 +73,9 @@ Each completed question is synchronously appended to `records.jsonl`; rerun the
 same command after a timeout and it skips those questions. This makes the only
 new-generation part safe to run in a temporary notebook session.
 
+Before the full comparison, use `--max-questions 1` with a separate output
+directory for a one-question GPU smoke test.
+
 ## Environment
 
 Use Python 3.10-3.12 on a machine with an NVIDIA CUDA GPU. Install an appropriate

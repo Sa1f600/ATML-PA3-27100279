@@ -139,18 +139,22 @@ def main() -> None:
     parser.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct")
     parser.add_argument("--revision", required=True, help="Exact Qwen revision stated in the course data README")
     parser.add_argument("--seed", type=int, default=6304)
+    parser.add_argument("--max-questions", type=int, default=50,
+                        help="Run this many of the frozen first-50 held-out questions (1-50); useful for a smoke test.")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("Task 3 live generation requires CUDA.")
     output, records_path = Path(args.output), Path(args.output) / "records.jsonl"
     manifest = json.loads(Path(args.manifest).read_text())
-    sample_ids = [str(value) for value in manifest["test_ids"][:50]]
+    if not 1 <= args.max_questions <= 50:
+        raise ValueError("--max-questions must be between 1 and 50.")
+    sample_ids = [str(value) for value in manifest["test_ids"][:args.max_questions]]
     questions = load_questions(Path(args.questions))
     missing = [value for value in sample_ids if value not in questions]
     if missing:
         raise ValueError("The supplied question table does not match the frozen MATH held-out IDs.")
     done = completed_ids(records_path)
-    print(f"Task 3 live runner: {len(done)}/50 questions already checkpointed.", flush=True)
+    print(f"Task 3 live runner: {len(done)}/{len(sample_ids)} questions already checkpointed.", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision)
     model = AutoModelForCausalLM.from_pretrained(args.model, revision=args.revision, torch_dtype=torch.float16).to("cuda").eval()
     for index, sample_id in enumerate(sample_ids, 1):
@@ -174,7 +178,7 @@ def main() -> None:
                       "sequential_refinement": {**metrics([parallel[0], revision], revision["answer"]), "initial_correct": score_output(parallel[0], item["gold"])}},
                   "peak_gpu_bytes": int(torch.cuda.max_memory_allocated()), "completed_index": index, "model": args.model, "revision": args.revision}
         append_record(records_path, record)
-        print(f"Saved live question {index}/50 to {records_path}", flush=True)
+        print(f"Saved live question {index}/{len(sample_ids)} to {records_path}", flush=True)
     write_summary(records_path)
     print(f"Task 3 live comparison complete. Summary: {records_path.parent / 'summary.csv'}", flush=True)
 
