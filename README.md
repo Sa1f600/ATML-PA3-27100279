@@ -57,14 +57,15 @@ adaptive-policy choices, paired bootstrap intervals, signal summaries, and plot
 inputs for both exports. Selection and stopping never read gold answers.
 
 The 50-question MATH live experiment is separate and resumable. First run the
-offline analysis; then point `--manifest` to its MATH split manifest and point
-`--questions` to the course bundle's matching sample-id/question table:
+offline analysis; then point `--manifest` to its MATH split manifest and use the
+course bundle's MATH `generations.parquet` as the question table (it contains
+`sample_id`, `question_text`, and `gold_answer`):
 
 ```bash
 python -m task3_test_time.live \
   --manifest results/task3/offline/math/MATH_split_and_orders.json \
-  --questions data/ATML-PA3-Data/math_questions.parquet \
-  --revision <course-README-Qwen-revision> \
+  --questions data/ATML-PA3-Data/qwen25-math/generations.parquet \
+  --revision aa8e72537993ba99e69dfaafa59ed015b17504d1 \
   --output results/task3/live_math
 ```
 

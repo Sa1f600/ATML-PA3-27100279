@@ -1,5 +1,6 @@
 from task3_test_time.core import Candidate, adaptive_stop, attach_visconf, choose, group_answers, normalise_answer, rank_weights
 from task3_test_time.offline import load_source, signal_report
+from task3_test_time.live import load_questions
 import pandas as pd
 import pytest
 
@@ -123,6 +124,13 @@ def test_smoke_config_requires_positive_question_count(tmp_path):
     from task3_test_time.offline import run
     with pytest.raises(ValueError, match="at least 1"):
         run({"input_root": str(tmp_path), "output_dir": str(tmp_path / "out"), "sources": [], "smoke_questions": 0})
+
+
+def test_live_loader_accepts_supplied_math_generations_table(tmp_path):
+    path = tmp_path / "generations.parquet"
+    pd.DataFrame({"sample_id": ["test:7", "test:7"], "question_text": ["What is 2 + 2?", "What is 2 + 2?"],
+                  "gold_answer": ["4", "4"]}).to_parquet(path)
+    assert load_questions(path) == {"test:7": {"question": "What is 2 + 2?", "gold": "4"}}
 
 
 def test_signal_report_uses_within_rollout_token_correlation():

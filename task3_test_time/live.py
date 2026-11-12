@@ -42,7 +42,7 @@ def last_boxed(text: str) -> str | None:
 
 def load_questions(path: Path) -> dict[str, dict[str, Any]]:
     frame = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_json(path, lines=path.suffix == ".jsonl")
-    aliases = {"sample_id": ("sample_id", "question_id", "id"), "question": ("question", "problem", "prompt"),
+    aliases = {"sample_id": ("sample_id", "question_id", "id"), "question": ("question", "question_text", "problem", "prompt"),
                "gold": ("gold", "gold_answer", "answer", "solution")}
     selected: dict[str, str] = {}
     for field, names in aliases.items():
