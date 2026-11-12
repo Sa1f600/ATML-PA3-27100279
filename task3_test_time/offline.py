@@ -89,7 +89,15 @@ def metadata_for_source(spec: dict[str, Any], root: Path, rows: pd.DataFrame) ->
     if not metadata_path:
         return rows
     path = _path(root, metadata_path)
-    metadata = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_json(path)
+    if path.suffix == ".parquet":
+        metadata = pd.read_parquet(path)
+    elif path.suffix == ".json":
+        # MathVista's released testmini metadata is a JSON object keyed by pid,
+        # rather than a JSON-lines table.  Preserve each object as one row.
+        raw_metadata = read_json(path)
+        metadata = pd.DataFrame(list(raw_metadata.values()) if isinstance(raw_metadata, dict) else raw_metadata)
+    else:
+        raise ValueError(f"Unsupported question metadata format: {path}")
     mapping = spec.get("metadata_columns", {})
     source_id = column(metadata, "sample_id", configured=mapping)
     answer_type = column(metadata, "answer_type", required=False, configured=mapping)

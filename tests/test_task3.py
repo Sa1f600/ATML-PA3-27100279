@@ -72,6 +72,22 @@ def test_loader_preserves_and_validates_token_level_vlm_arrays(tmp_path):
     assert loaded.iloc[0].choice_options == ("wrong", "A")
 
 
+def test_loader_accepts_released_mathvista_json_metadata(tmp_path):
+    metadata = {
+        "1": {"pid": "1", "question_type": "multi_choice", "answer_type": "text", "precision": 0,
+              "choices": ["wrong", "right"]},
+        "2": {"pid": "2", "question_type": "free_form", "answer_type": "float", "precision": 1,
+              "choices": None},
+    }
+    (tmp_path / "metadata.json").write_text(__import__("json").dumps(metadata))
+    rows = pd.DataFrame({"sample_id": ["1", "2"]})
+    loaded = __import__("task3_test_time.offline", fromlist=["metadata_for_source"]).metadata_for_source(
+        {"question_metadata": "metadata.json", "metadata_columns": {"sample_id": "pid", "answer_type": "question_type",
+         "precision": "precision", "choices": "choices"}}, tmp_path, rows)
+    assert loaded.multiple_choice.tolist() == [True, False]
+    assert loaded.choice_options.iloc[0] == ("wrong", "right")
+
+
 def test_signal_report_uses_within_rollout_token_correlation():
     signal = pd.DataFrame([
         {"sample_id": "q", "order": 0, "rollout_id": "a", "length": 2, "mean_logp": -.1, "self_certainty": .5,

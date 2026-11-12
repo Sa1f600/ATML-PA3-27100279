@@ -8,20 +8,20 @@
       "name": "math",
       "dataset": "MATH",
       "multiple_choice": false,
-      "generations": "qwen2.5-3b-instruct/generations.parquet",
-      "probability_metrics": "qwen2.5-3b-instruct/probability_metrics.parquet"
+      "generations": "qwen25-math/generations.parquet",
+      "probability_metrics": "qwen25-math/probability_metrics.parquet"
     },
     {
       "name": "mathvista",
       "dataset": "MathVista",
       "multiple_choice": true,
-      "generations": "qwen2.5-vl-3b-instruct/generations.parquet",
-      "probability_metrics": "qwen2.5-vl-3b-instruct/probability_metrics.parquet",
-      "attention_metrics": "qwen2.5-vl-3b-instruct/attention_metrics.parquet",
-      "question_metadata": "mathvista_question_metadata.parquet",
+      "generations": "qwen25vl-mathvista/generations.parquet",
+      "probability_metrics": "qwen25vl-mathvista/probability_metrics.parquet",
+      "attention_metrics": "qwen25vl-mathvista/attention_metrics.parquet",
+      "question_metadata": "mathvista_testmini.json",
       "metadata_columns": {
-        "sample_id": "sample_id",
-        "answer_type": "answer_type",
+        "sample_id": "pid",
+        "answer_type": "question_type",
         "precision": "precision",
         "choices": "choices"
       }
