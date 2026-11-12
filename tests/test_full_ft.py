@@ -15,7 +15,8 @@ from task1_finetuning.data import (
     response_loss_sum, response_token_count,
 )
 from task1_finetuning.train_full_ft import (
-    lr_for_update, make_optimizer, parameter_displacement, save_checkpoint, smoke_config, validate_config,
+    accumulation_steps, lr_for_update, make_optimizer, parameter_displacement, save_checkpoint, smoke_config,
+    validate_config,
 )
 
 
@@ -115,6 +116,13 @@ def test_schedule_and_prescribed_config():
     cfg["microbatch_size"] = 4
     with pytest.raises(ValueError):
         validate_config(cfg)
+
+
+def test_fallback_accumulation_preserves_the_required_effective_batch():
+    assert accumulation_steps(32, 2) == 16
+    assert accumulation_steps(32, 1) == 32
+    with pytest.raises(ValueError):
+        accumulation_steps(32, 3)
 
 
 def test_smoke_config_isolated_from_required_run_outputs():

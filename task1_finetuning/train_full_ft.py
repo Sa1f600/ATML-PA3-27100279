@@ -5,6 +5,7 @@ its model mode, RNG usage, runtime and GPU memory do not contaminate training.
 """
 
 import argparse
+import gc
 import importlib.metadata
 import json
 import math
@@ -98,6 +99,13 @@ def make_optimizer(model, cfg):
         lr=cfg["learning_rate"], betas=tuple(cfg["adam_betas"]),
         eps=cfg["adam_epsilon"], foreach=False,
     )
+
+
+def accumulation_steps(effective_batch, microbatch_size):
+    """Return the number of microbatches needed without changing the batch."""
+    if microbatch_size < 1 or effective_batch % microbatch_size:
+        raise ValueError("Microbatch size must be a positive divisor of the effective batch.")
+    return effective_batch // microbatch_size
 
 
 @torch.no_grad()
@@ -341,6 +349,12 @@ def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, ex
     write_json(results / "environment.json", environment_info())
     torch.cuda.reset_peak_memory_stats()
     effective_batch = cfg["microbatch_size"] * cfg["gradient_accumulation_steps"]
+    # Keep the prescribed microbatch whenever it fits.  On a 15 GB GPU, an
+    # unusually long pair can require a one-example fallback.  The fallback
+    # preserves the prescribed effective batch, example order, loss weighting,
+    # optimizer update count, and learning-rate schedule; it merely performs
+    # more accumulation passes for that same update.
+    active_microbatch_size = cfg["microbatch_size"]
     for update in range(progress["update"] + 1, cfg["num_updates"] + 1):
         start_index = progress["examples_seen"]
         rows = [dataset[i] for i in range(start_index, start_index + effective_batch)]
@@ -354,38 +368,77 @@ def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, ex
         for attempt in range(cfg["max_overflow_retries"] + 1):
             optimizer.zero_grad(set_to_none=True)
             loss_sum = 0.0
+            batch = labels = output = numerator = loss = None
+            regularization = None
             torch.cuda.synchronize()
             started = time.perf_counter()
-            for offset in range(0, effective_batch, cfg["microbatch_size"]):
-                batch = collate_examples(rows[offset:offset + cfg["microbatch_size"]], tokenizer.pad_token_id)
-                batch = {key: value.to("cuda") for key, value in batch.items()}
-                labels = batch.pop("labels")
-                with torch.autocast("cuda", dtype=torch.float16):
-                    output = model(**batch)
-                    numerator = response_loss_sum(output.logits, labels)
-                    loss = numerator / denominator
-                scaler.scale(loss).backward()
-                loss_sum += numerator.detach().item()
+            try:
+                for offset in range(0, effective_batch, active_microbatch_size):
+                    batch = collate_examples(
+                        rows[offset:offset + active_microbatch_size], tokenizer.pad_token_id,
+                    )
+                    batch = {key: value.to("cuda") for key, value in batch.items()}
+                    labels = batch.pop("labels")
+                    with torch.autocast("cuda", dtype=torch.float16):
+                        output = model(**batch)
+                        numerator = response_loss_sum(output.logits, labels)
+                        loss = numerator / denominator
+                    scaler.scale(loss).backward()
+                    loss_sum += numerator.detach().item()
+                    del output, numerator, loss, labels, batch
+                    batch = labels = output = numerator = loss = None
+                if cfg["l2_sp_lambda"]:
+                    # Add lambda*(theta-theta0) ONCE per effective batch in the
+                    # same scaled units as SFT, before unscale/overflow check/clip.
+                    regularization = add_l2_sp_gradients(
+                        model, reference, cfg["l2_sp_lambda"], scaler.get_scale(),
+                    )
+                scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["max_grad_norm"])
+                previous_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                skipped = scaler.get_scale() < previous_scale
+            except torch.OutOfMemoryError as error:
+                # Discard all partial gradients before deterministically
+                # replaying this exact effective batch at a smaller microbatch.
                 del output, numerator, loss, labels, batch
-            regularization = None
-            if cfg["l2_sp_lambda"]:
-                # Add lambda*(theta-theta0) ONCE per effective batch in the
-                # same scaled units as SFT, before unscale/overflow check/clip.
-                regularization = add_l2_sp_gradients(
-                    model, reference, cfg["l2_sp_lambda"], scaler.get_scale(),
+                optimizer.zero_grad(set_to_none=True)
+                gc.collect()
+                torch.cuda.empty_cache()
+                elapsed = time.perf_counter() - started
+                progress["training_seconds"] += elapsed
+                if active_microbatch_size == 1:
+                    raise RuntimeError(
+                        "CUDA OOM even at microbatch size 1; a larger GPU or shorter maximum length is required."
+                    ) from error
+                previous_microbatch_size = active_microbatch_size
+                active_microbatch_size = max(1, active_microbatch_size // 2)
+                append_jsonl(results / "oom_retries.jsonl", {
+                    "update": update, "attempt": attempt + 1,
+                    "configured_microbatch_size": cfg["microbatch_size"],
+                    "previous_microbatch_size": previous_microbatch_size,
+                    "retry_microbatch_size": active_microbatch_size,
+                    "effective_batch": effective_batch,
+                    "accumulation_steps": accumulation_steps(effective_batch, active_microbatch_size),
+                    "attempt_seconds": elapsed,
+                    "reason": str(error).splitlines()[0],
+                })
+                print(
+                    f"CUDA OOM at update {update}; retrying the same {effective_batch} examples "
+                    f"with microbatch={active_microbatch_size} and "
+                    f"accumulation={accumulation_steps(effective_batch, active_microbatch_size)}.",
+                    flush=True,
                 )
+                restore_rng(attempt_rng)
+                continue
+            if regularization:
                 for key in ("regularization_seconds", "reference_transfer_seconds", "reference_transfer_bytes"):
                     progress[key] += regularization[key]
                 progress["largest_reference_gpu_chunk_bytes"] = max(
                     progress["largest_reference_gpu_chunk_bytes"],
                     regularization["largest_reference_gpu_chunk_bytes"],
                 )
-            scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["max_grad_norm"])
-            previous_scale = scaler.get_scale()
-            scaler.step(optimizer)
-            scaler.update()
-            skipped = scaler.get_scale() < previous_scale
             torch.cuda.synchronize()
             elapsed = time.perf_counter() - started
             progress["training_seconds"] += elapsed
@@ -399,6 +452,8 @@ def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, ex
                 "gradient_norm_before_clip": grad_norm.item() if torch.isfinite(grad_norm) else None,
                 "scaler_before": previous_scale, "scaler_after": scaler.get_scale(),
                 "attempt_seconds": elapsed, "training_seconds": progress["training_seconds"],
+                "active_microbatch_size": active_microbatch_size,
+                "gradient_accumulation_steps": accumulation_steps(effective_batch, active_microbatch_size),
             }
             if regularization:
                 total_loss = loss_sum / denominator + regularization["lambda_omega"]
