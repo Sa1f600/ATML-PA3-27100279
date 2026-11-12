@@ -25,6 +25,12 @@ INSTRUCTION = "Think step by step inside <think> </think> tags, then give your f
 REVIEW = "Review the solution above. Identify and correct any errors; if it is correct, retain its answer. Give your final answer inside \\boxed{}."
 
 
+def initial_messages(question: str) -> list[dict[str, str]]:
+    """Build the fixed course-specified chat prefix for a live MATH question."""
+    return [{"role": "system", "content": SYSTEM},
+            {"role": "user", "content": question + "\n\n" + INSTRUCTION}]
+
+
 def last_boxed(text: str) -> str | None:
     marker, start = "\\boxed{", text.rfind("\\boxed{")
     if start < 0:
@@ -160,8 +166,8 @@ def main() -> None:
     for index, sample_id in enumerate(sample_ids, 1):
         if sample_id in done:
             continue
-        item, messages = questions[sample_id], [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": item["question"] + "\n\n" + INSTRUCTION}]
+        item = questions[sample_id]
+        messages = initial_messages(item["question"])
         torch.cuda.reset_peak_memory_stats()
         print(f"Live question {index}/{len(sample_ids)}: generating single long response...", flush=True)
         single = generate(model, tokenizer, messages, 3072, args.seed + index * 10)

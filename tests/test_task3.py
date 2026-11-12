@@ -1,6 +1,6 @@
 from task3_test_time.core import Candidate, adaptive_stop, attach_visconf, choose, group_answers, normalise_answer, rank_weights
 from task3_test_time.offline import load_source, signal_report
-from task3_test_time.live import load_questions
+from task3_test_time.live import initial_messages, load_questions
 import pandas as pd
 import pytest
 
@@ -131,6 +131,12 @@ def test_live_loader_accepts_supplied_math_generations_table(tmp_path):
     pd.DataFrame({"sample_id": ["test:7", "test:7"], "question_text": ["What is 2 + 2?", "What is 2 + 2?"],
                   "gold_answer": ["4", "4"]}).to_parquet(path)
     assert load_questions(path) == {"test:7": {"question": "What is 2 + 2?", "gold": "4"}}
+
+
+def test_live_initial_messages_use_the_fixed_course_prompt():
+    messages = initial_messages("What is 2 + 2?")
+    assert messages[0]["content"] == "You are a helpful assistant."
+    assert messages[1]["content"].startswith("What is 2 + 2?\n\nThink step by step")
 
 
 def test_signal_report_uses_within_rollout_token_correlation():
