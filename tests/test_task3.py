@@ -98,6 +98,12 @@ def test_metadata_loader_rejects_unmatched_rollout_id(tmp_path):
         loader({"question_metadata": "metadata.json", "metadata_columns": {"sample_id": "pid"}}, tmp_path, rows)
 
 
+def test_smoke_config_requires_positive_question_count(tmp_path):
+    from task3_test_time.offline import run
+    with pytest.raises(ValueError, match="at least 1"):
+        run({"input_root": str(tmp_path), "output_dir": str(tmp_path / "out"), "sources": [], "smoke_questions": 0})
+
+
 def test_signal_report_uses_within_rollout_token_correlation():
     signal = pd.DataFrame([
         {"sample_id": "q", "order": 0, "rollout_id": "a", "length": 2, "mean_logp": -.1, "self_certainty": .5,

@@ -398,10 +398,19 @@ def qualitative(records: pd.DataFrame, ids: set[str]) -> list[dict[str, Any]]:
 def run(config: dict[str, Any]) -> None:
     root, output = Path(config["input_root"]).expanduser(), Path(config.get("output_dir", "results/task3/offline")).expanduser()
     output.mkdir(parents=True, exist_ok=True)
+    smoke_questions = config.get("smoke_questions")
+    if smoke_questions is not None:
+        smoke_questions = int(smoke_questions)
+        if smoke_questions < 1:
+            raise ValueError("smoke_questions must be at least 1 when supplied.")
+        print(f"SMOKE MODE: validating all supplied rows, then analysing only {smoke_questions} question(s) per source.", flush=True)
     all_summaries = []
     for spec in config["sources"]:
         print(f"Loading and validating {spec['name']}...", flush=True)
         rows, metadata = load_source(spec, root)
+        if smoke_questions is not None:
+            selected_ids = sorted(rows.sample_id.unique())[:smoke_questions]
+            rows = rows[rows.sample_id.isin(selected_ids)].copy()
         dataset_output = output / spec["name"]
         manifest = build_manifest(rows, dataset_output, int(config.get("seed", 6304)), int(config.get("orders", 10)))
         fixed, signals = fixed_records(rows, manifest, bool(spec.get("attention_metrics")))
