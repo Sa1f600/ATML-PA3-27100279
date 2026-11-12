@@ -194,6 +194,10 @@ def load_source(spec: dict[str, Any], root: Path) -> tuple[pd.DataFrame, dict[st
         attention = pd.read_parquet(_path(root, attention_path))
         a_sample, a_rollout = column(attention, "sample_id"), column(attention, "rollout_id")
         attention = attention.rename(columns={a_sample: "sample_id", a_rollout: "rollout_id"})
+        # Supplied generation exports use textual IDs while the attention export
+        # can store the same rollout IDs as integers.  Normalize before joining.
+        attention["sample_id"] = attention["sample_id"].astype(str)
+        attention["rollout_id"] = attention["rollout_id"].astype(str)
         a_keys = ["sample_id", "rollout_id"]
         image, prompt, generated = (column(attention, name) for name in ("image", "prompt", "generated"))
         image_values = sequence_table(attention, a_keys, image, "image_tokens")

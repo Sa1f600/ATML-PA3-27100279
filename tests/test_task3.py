@@ -79,6 +79,7 @@ def test_loader_accepts_course_attention_column_names(tmp_path):
     probability = generations[["sample_id", "rollout_id"]].copy()
     probability["logp"], probability["kl_u_p"] = [[-.1, -.2]] * len(probability), [[.2, .4]] * len(probability)
     attention = generations[["sample_id", "rollout_id"]].copy()
+    attention["rollout_id"] = attention["rollout_id"].astype(int)
     attention["img_attn_total"], attention["prompt_text_attn_total"], attention["generated_text_attn_total"] = [[1., 1.]] * len(attention), [[1., 1.]] * len(attention), [[2., 2.]] * len(attention)
     metadata = pd.DataFrame({"pid": [f"q{i:04d}" for i in range(1000)], "question_type": "multi_choice", "precision": 0,
                              "choices": [["wrong", "A"]] * 1000})
