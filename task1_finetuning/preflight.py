@@ -33,12 +33,17 @@ def package_version(name):
 def check_environment(cfg):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable; enable a Kaggle GPU before a Task 1 run.")
+    # Training configurations intentionally contain only training settings;
+    # the lm-eval harness pin is shared by every Task 1 method and lives in
+    # the evaluation configuration.  Accept an explicit override for custom
+    # configurations, otherwise use that shared pin.
+    harness_version = cfg.get("harness_version", read_json(DEFAULT_CONFIG)["harness_version"])
     expected = {
         "torch": "2.8.0",
         "torchvision": "0.23.0",
         "transformers": "4.53.1",
         "datasets": "3.6.0",
-        "lm_eval": cfg["harness_version"],
+        "lm_eval": harness_version,
     }
     actual = {name: package_version(name) for name in expected}
     wrong = {name: (expected[name], actual[name]) for name in expected
