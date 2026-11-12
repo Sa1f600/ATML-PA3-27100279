@@ -28,9 +28,11 @@ ALIASES = {
     "token_ids": ("generated_token_ids", "output_token_ids", "token_ids"),
     "logp": ("logp", "token_logp", "sampled_token_logp"),
     "kl": ("kl_u_p", "token_kl_u_p", "kl"),
-    "image": ("image_attention", "attention_image", "image"),
-    "prompt": ("prompt_attention", "attention_prompt", "prompt"),
-    "generated": ("generated_attention", "attention_generated", "generated"),
+    # The course's MathVista export stores one token-aligned attention array
+    # per group under the *_attn_total names.
+    "image": ("image_attention", "attention_image", "image", "img_attn_total"),
+    "prompt": ("prompt_attention", "attention_prompt", "prompt", "prompt_text_attn_total"),
+    "generated": ("generated_attention", "attention_generated", "generated", "generated_text_attn_total"),
     "answer_type": ("answer_type", "question_type", "type"),
     "precision": ("precision", "answer_precision", "decimal_places"),
     "choices": ("choices", "options", "answer_choices"),

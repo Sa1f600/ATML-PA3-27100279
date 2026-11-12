@@ -72,6 +72,26 @@ def test_loader_preserves_and_validates_token_level_vlm_arrays(tmp_path):
     assert loaded.iloc[0].choice_options == ("wrong", "A")
 
 
+def test_loader_accepts_course_attention_column_names(tmp_path):
+    rows = [{"sample_id": f"q{i:04d}", "rollout_id": str(rollout), "extracted_answer": "A", "gold_answer": "A",
+             "generated_token_ids": [1, 2]} for i in range(1000) for rollout in range(32)]
+    generations = pd.DataFrame(rows)
+    probability = generations[["sample_id", "rollout_id"]].copy()
+    probability["logp"], probability["kl_u_p"] = [[-.1, -.2]] * len(probability), [[.2, .4]] * len(probability)
+    attention = generations[["sample_id", "rollout_id"]].copy()
+    attention["img_attn_total"], attention["prompt_text_attn_total"], attention["generated_text_attn_total"] = [[1., 1.]] * len(attention), [[1., 1.]] * len(attention), [[2., 2.]] * len(attention)
+    metadata = pd.DataFrame({"pid": [f"q{i:04d}" for i in range(1000)], "question_type": "multi_choice", "precision": 0,
+                             "choices": [["wrong", "A"]] * 1000})
+    generations.to_parquet(tmp_path / "g.parquet")
+    probability.to_parquet(tmp_path / "p.parquet")
+    attention.to_parquet(tmp_path / "a.parquet")
+    metadata.to_parquet(tmp_path / "m.parquet")
+    loaded, _ = load_source({"name": "course_schema", "dataset": "MathVista", "generations": "g.parquet", "probability_metrics": "p.parquet",
+                              "attention_metrics": "a.parquet", "question_metadata": "m.parquet",
+                              "metadata_columns": {"sample_id": "pid", "answer_type": "question_type"}}, tmp_path)
+    assert loaded.iloc[0].token_vision == [.25, .25]
+
+
 def test_loader_accepts_released_mathvista_json_metadata(tmp_path):
     metadata = {
         "1": {"pid": "1", "question_type": "multi_choice", "answer_type": "text", "precision": 0,
