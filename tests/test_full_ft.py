@@ -15,7 +15,7 @@ from task1_finetuning.data import (
     response_loss_sum, response_token_count,
 )
 from task1_finetuning.train_full_ft import (
-    lr_for_update, make_optimizer, parameter_displacement, save_checkpoint, validate_config,
+    lr_for_update, make_optimizer, parameter_displacement, save_checkpoint, smoke_config, validate_config,
 )
 
 
@@ -97,6 +97,18 @@ def test_schedule_and_prescribed_config():
     cfg["microbatch_size"] = 4
     with pytest.raises(ValueError):
         validate_config(cfg)
+
+
+def test_smoke_config_isolated_from_required_run_outputs():
+    with open("configs/task1/full_ft.json") as stream:
+        prescribed = json.load(stream)
+    smoke = smoke_config(prescribed)
+    assert prescribed["num_updates"] == 1250
+    assert smoke["num_updates"] == 1
+    assert smoke["checkpoint_updates"] == []
+    assert smoke["displacement_updates"] == []
+    assert smoke["results_dir"].endswith("smoke_training/full_ft")
+    assert smoke["checkpoint_dir"].endswith("smoke_training/full_ft")
 
 
 def test_optimizer_groups_and_displacement_count_tied_weights_once():

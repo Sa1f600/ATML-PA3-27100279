@@ -60,6 +60,24 @@ def validate_config(cfg):
             raise ValueError(f"Manual requires {key}={expected!r}; got {cfg[key]!r}")
 
 
+def smoke_config(cfg):
+    """Return an isolated one-update configuration for a hardware smoke test.
+
+    The required assignment configuration is validated before this helper is
+    used.  The smoke run therefore exercises the real model, prepared data,
+    AMP, accumulation, optimizer, and backward pass, without creating output
+    that could be mistaken for a prescribed 1,250-update experiment.
+    """
+    return {
+        **cfg,
+        "num_updates": 1,
+        "checkpoint_updates": [],
+        "displacement_updates": [],
+        "results_dir": str(Path(cfg["results_dir"]).parent / "smoke_training" / cfg["method"]),
+        "checkpoint_dir": str(Path(cfg["checkpoint_dir"]).parent / "smoke_training" / cfg["method"]),
+    }
+
+
 def lr_for_update(update, warmup, total, peak):
     """1-based optimizer update: first 38 linearly warm up; last reaches zero."""
     if update <= warmup:
@@ -162,9 +180,16 @@ def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, ex
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=default_config)
     parser.add_argument("--resume", type=Path, help="Trusted update_XXXX recovery checkpoint")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="Run one real effective update in an isolated smoke directory.")
     args = parser.parse_args(argv)
     cfg = read_json(args.config)
     validate_config(cfg)
+    if args.smoke_test:
+        if args.resume:
+            raise ValueError("A smoke test always starts from the original checkpoint; do not use --resume.")
+        cfg = smoke_config(cfg)
+        print("SMOKE MODE: running one real effective update; this is not an assignment training run.", flush=True)
     if cfg["method"] != expected_method:
         raise ValueError(f"This entry point expects method={expected_method}.")
     adapter_run = cfg["method"] in ("lora", "oplora")
@@ -420,7 +445,10 @@ def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, ex
             "basis_file_bytes": basis_info.get("basis_file_bytes", 0),
             "basis_preprocessing_seconds": basis_info.get("preprocessing_seconds", 0),
         })
-    print("Training complete. Required benchmark evaluation remains a separate step.")
+    if args.smoke_test:
+        print("Task 1 training smoke test passed. No recovery checkpoint was created.", flush=True)
+    else:
+        print("Training complete. Required benchmark evaluation remains a separate step.")
 
 
 if __name__ == "__main__":
