@@ -16,7 +16,7 @@ from task1_finetuning.data import (
 )
 from task1_finetuning.train_full_ft import (
     accumulation_steps, lr_for_update, make_optimizer, parameter_displacement, prune_checkpoint_history,
-    save_checkpoint, smoke_config,
+    resume_config_matches, save_checkpoint, smoke_config,
     validate_config,
 )
 
@@ -205,6 +205,13 @@ def test_checkpoint_retention_prunes_only_completed_older_recoveries(tmp_path):
     assert removed == [str(tmp_path / "update_0312"), str(tmp_path / "update_0625")]
     assert (tmp_path / "update_0937").exists()
     assert incomplete.exists()
+
+
+def test_resume_allows_storage_only_checkpoint_retention_setting():
+    saved = {"method": "full_ft_l2_sp", "num_updates": 1250, "learning_rate": 2e-5}
+    current = {**saved, "checkpoint_retention": 1}
+    assert resume_config_matches(saved, current)
+    assert not resume_config_matches(saved, {**current, "learning_rate": 1e-4})
 
 
 def test_actual_qwen_non_thinking_template_and_eot_mask():

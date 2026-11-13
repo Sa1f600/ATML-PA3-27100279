@@ -213,6 +213,21 @@ def prune_checkpoint_history(cfg):
     return removed
 
 
+def resume_config_matches(saved_cfg, current_cfg):
+    """Compare training semantics while permitting later storage-only settings.
+
+    A retention limit affects only which already-complete recovery copies stay
+    on disk.  It must not invalidate an otherwise identical checkpoint made
+    before this setting existed.
+    """
+    saved = dict(saved_cfg)
+    current = dict(current_cfg)
+    for key in ("checkpoint_retention",):
+        saved.pop(key, None)
+        current.pop(key, None)
+    return saved == current
+
+
 def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, expected_rank=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=default_config)
@@ -265,7 +280,7 @@ def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, ex
     if args.resume:
         # Never load untrusted trainer_state.pt files.
         resume = torch.load(args.resume / "trainer_state.pt", map_location="cpu", weights_only=False)
-        if resume["config"] != cfg or resume["prepared_metadata_sha256"] != metadata_hash:
+        if not resume_config_matches(resume["config"], cfg) or resume["prepared_metadata_sha256"] != metadata_hash:
             raise ValueError("Resume configuration or data differ from saved run.")
         saved_update = resume["progress"]["update"]
         if saved_update >= cfg["num_updates"]:
