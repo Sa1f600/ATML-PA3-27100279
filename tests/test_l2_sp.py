@@ -106,8 +106,10 @@ def test_l2_sp_config_matches_full_ft_except_required_differences():
     with open("configs/task1/full_ft_l2_sp.json") as stream:
         regularized = json.load(stream)
     validate_config(regularized)
-    differing = {key for key in vanilla if vanilla[key] != regularized[key]}
-    assert differing == {"method", "l2_sp_lambda", "displacement_updates", "checkpoint_dir", "results_dir"}
+    differing = {key for key in set(vanilla) | set(regularized) if vanilla.get(key) != regularized.get(key)}
+    assert differing == {"method", "l2_sp_lambda", "displacement_updates", "checkpoint_dir", "results_dir",
+                         "checkpoint_retention"}
+    assert regularized["checkpoint_retention"] == 1
     assert regularized["displacement_updates"] == [1250]
     regularized["l2_sp_lambda"] = 1e-4
     with pytest.raises(ValueError):

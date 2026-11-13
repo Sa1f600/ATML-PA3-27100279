@@ -15,7 +15,8 @@ from task1_finetuning.data import (
     response_loss_sum, response_token_count,
 )
 from task1_finetuning.train_full_ft import (
-    accumulation_steps, lr_for_update, make_optimizer, parameter_displacement, save_checkpoint, smoke_config,
+    accumulation_steps, lr_for_update, make_optimizer, parameter_displacement, prune_checkpoint_history,
+    save_checkpoint, smoke_config,
     validate_config,
 )
 
@@ -191,6 +192,19 @@ def test_checkpoint_restores_model_optimizer_and_next_update(tmp_path):
     step(restored, new_optimizer)
     for p, q in zip(model.parameters(), restored.parameters()):
         torch.testing.assert_close(p, q, rtol=0, atol=0)
+
+
+def test_checkpoint_retention_prunes_only_completed_older_recoveries(tmp_path):
+    for update in (312, 625, 937):
+        folder = tmp_path / f"update_{update:04d}"
+        folder.mkdir()
+        (folder / "checkpoint_summary.json").write_text("{}")
+    incomplete = tmp_path / "update_1250.saving"
+    incomplete.mkdir()
+    removed = prune_checkpoint_history({"checkpoint_dir": str(tmp_path), "checkpoint_retention": 1})
+    assert removed == [str(tmp_path / "update_0312"), str(tmp_path / "update_0625")]
+    assert (tmp_path / "update_0937").exists()
+    assert incomplete.exists()
 
 
 def test_actual_qwen_non_thinking_template_and_eot_mask():

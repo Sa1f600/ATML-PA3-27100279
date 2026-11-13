@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import time
 
@@ -182,6 +183,34 @@ def save_checkpoint(model, tokenizer, optimizer, scaler, cfg, metadata_hash, pro
     temporary.rename(final)
     restore_rng(before_rng)
     return {**summary, "path": str(final)}
+
+
+def prune_checkpoint_history(cfg):
+    """Keep only the requested number of *successfully completed* recoveries.
+
+    This is deliberately called only after ``save_checkpoint`` has atomically
+    renamed a complete checkpoint into place.  Therefore a full disk or an
+    interrupted write can never remove the prior recovery point.  It is used
+    for L2-SP, whose report requires only the final model, on notebook disks
+    that cannot hold all four full-model optimizer recoveries simultaneously.
+    """
+    keep = cfg.get("checkpoint_retention")
+    if keep is None:
+        return []
+    if not isinstance(keep, int) or keep < 1:
+        raise ValueError("checkpoint_retention must be a positive integer when provided.")
+    root = Path(cfg["checkpoint_dir"])
+    completed = []
+    for candidate in root.glob("update_*"):
+        suffix = candidate.name.removeprefix("update_")
+        if candidate.is_dir() and suffix.isdigit() and (candidate / "checkpoint_summary.json").is_file():
+            completed.append((int(suffix), candidate))
+    completed.sort()
+    removed = []
+    for _, candidate in completed[:-keep]:
+        shutil.rmtree(candidate)
+        removed.append(str(candidate))
+    return removed
 
 
 def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, expected_rank=None):
@@ -483,6 +512,10 @@ def main(default_config=DEFAULT_CONFIG, expected_method="full_ft", argv=None, ex
             })
         if update in cfg["checkpoint_updates"]:
             summary = save_checkpoint(model, tokenizer, optimizer, scaler, cfg, metadata_hash, dict(progress))
+            removed = prune_checkpoint_history(cfg)
+            if removed:
+                summary["pruned_recovery_checkpoints"] = removed
+                print("Pruned superseded recovery checkpoint(s):", ", ".join(removed), flush=True)
             progress["checkpoint_seconds"] += summary["save_seconds"]
             progress["export_seconds"] += summary.get("export_seconds", 0)
             progress["export_bytes"] += summary.get("export_bytes", 0)

@@ -22,6 +22,7 @@
   "max_grad_norm": 1.0,
   "l2_sp_lambda": 0.001,
   "checkpoint_updates": [312, 625, 937, 1250],
+  "checkpoint_retention": 1,
   "displacement_updates": [1250],
   "prepared_dir": "cached/task1/prepared",
   "manifest_dir": "manifests/task1",
